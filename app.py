@@ -9,16 +9,6 @@ from datetime import datetime, timedelta
 import urllib.parse
 import requests
 
-# Get URL parameters for automatic auth code processing
-def get_url_params():
-    """Get URL parameters from the current page"""
-    try:
-        # Try to get query parameters from Streamlit
-        query_params = st.experimental_get_query_params()
-        return query_params
-    except:
-        return {}
-
 # Install required packages
 try:
     import streamlit as st
@@ -274,11 +264,20 @@ def main():
                     st.markdown(f"[🔗 Click here to authorize]({auth_url})")
                     
                     # Check for automatic auth code from URL
-                    query_params = get_url_params()
-                    auto_auth_code = query_params.get('code', [None])[0] if 'code' in query_params else None
+                    try:
+                        query_params = st.query_params
+                        auto_auth_code = query_params.get('code', None)
+                    except:
+                        # Fallback for older Streamlit versions
+                        try:
+                            query_params = st.experimental_get_query_params()
+                            auto_auth_code = query_params.get('code', [None])[0] if 'code' in query_params else None
+                        except:
+                            auto_auth_code = None
                     
                     if auto_auth_code:
                         st.info("🔄 Processing authorization code from URL...")
+                        st.write(f"Debug: Found auth code: {auto_auth_code[:20]}...")
                         
                         # Automatically process the auth code
                         if 'tokens_processed' not in st.session_state:
@@ -350,9 +349,19 @@ def main():
                                         st.info("📝 **Important:** Download the JSON file above and save your stream key in it for future use!")
                                         
                                         # Clear URL parameters to clean up the URL
-                                        st.experimental_set_query_params()
+                                        try:
+                                            st.query_params.clear()
+                                        except:
+                                            try:
+                                                st.experimental_set_query_params()
+                                            except:
+                                                pass
+                                        
+                                        # Force rerun to refresh the page
+                                        st.rerun()
                             else:
                                 st.error("❌ Failed to exchange authorization code for tokens")
+                                st.session_state['tokens_processed'] = True  # Prevent infinite retry
                     else:
                         # Manual auth code input (fallback)
                         st.info("After authorization, you'll be redirected back automatically, or paste the code below:")
@@ -371,6 +380,23 @@ def main():
                                     st.error("❌ Failed to exchange code for tokens")
                             else:
                                 st.error("Please enter the authorization code")
+                    
+                    # Debug information
+                    with st.expander("🔧 Debug Information"):
+                        try:
+                            query_params = st.query_params
+                            st.write("Current URL parameters:", dict(query_params))
+                        except:
+                            try:
+                                query_params = st.experimental_get_query_params()
+                                st.write("Current URL parameters (legacy):", query_params)
+                            except:
+                                st.write("Could not retrieve URL parameters")
+                        
+                        if 'tokens_processed' in st.session_state:
+                            st.write("Tokens processed:", st.session_state['tokens_processed'])
+                        
+                        st.write("Session state keys:", list(st.session_state.keys()))
         
         # JSON Configuration Upload
         st.subheader("Channel Configuration")
