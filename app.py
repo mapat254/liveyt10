@@ -9,6 +9,16 @@ from datetime import datetime, timedelta
 import urllib.parse
 import requests
 
+# Get URL parameters for automatic auth code processing
+def get_url_params():
+    """Get URL parameters from the current page"""
+    try:
+        # Try to get query parameters from Streamlit
+        query_params = st.experimental_get_query_params()
+        return query_params
+    except:
+        return {}
+
 # Install required packages
 try:
     import streamlit as st
@@ -262,17 +272,21 @@ def main():
                 if auth_url:
                     st.markdown("### Step 1: Authorize Access")
                     st.markdown(f"[🔗 Click here to authorize]({auth_url})")
-                    st.info("After authorization, you'll get a code. Paste it below:")
                     
-                    # Authorization code input
-                    auth_code = st.text_input("Authorization Code", type="password")
+                    # Check for automatic auth code from URL
+                    query_params = get_url_params()
+                    auto_auth_code = query_params.get('code', [None])[0] if 'code' in query_params else None
                     
-                    if st.button("Exchange Code for Tokens"):
-                        if auth_code:
-                            tokens = exchange_code_for_tokens(oauth_config, auth_code)
+                    if auto_auth_code:
+                        st.info("🔄 Processing authorization code from URL...")
+                        
+                        # Automatically process the auth code
+                        if 'tokens_processed' not in st.session_state:
+                            tokens = exchange_code_for_tokens(oauth_config, auto_auth_code)
                             if tokens:
                                 st.success("✅ Tokens obtained successfully!")
                                 st.session_state['youtube_tokens'] = tokens
+                                st.session_state['tokens_processed'] = True
                                 
                                 # Create credentials for YouTube service
                                 creds_dict = {
@@ -292,6 +306,7 @@ def main():
                                         st.success(f"🎉 Connected to: {channel['snippet']['title']}")
                                         st.session_state['youtube_service'] = service
                                         st.session_state['channel_info'] = channel
+                                        st.session_state['auto_authenticated'] = True
                                         
                                         # Create downloadable JSON with tokens
                                         auth_data = {
@@ -333,8 +348,29 @@ def main():
                                         )
                                         
                                         st.info("📝 **Important:** Download the JSON file above and save your stream key in it for future use!")
-                        else:
-                            st.error("Please enter the authorization code")
+                                        
+                                        # Clear URL parameters to clean up the URL
+                                        st.experimental_set_query_params()
+                            else:
+                                st.error("❌ Failed to exchange authorization code for tokens")
+                    else:
+                        # Manual auth code input (fallback)
+                        st.info("After authorization, you'll be redirected back automatically, or paste the code below:")
+                        
+                        # Authorization code input
+                        auth_code = st.text_input("Authorization Code (optional)", type="password")
+                        
+                        if st.button("Exchange Code for Tokens"):
+                            if auth_code:
+                                tokens = exchange_code_for_tokens(oauth_config, auth_code)
+                                if tokens:
+                                    st.success("✅ Tokens obtained successfully!")
+                                    st.session_state['youtube_tokens'] = tokens
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Failed to exchange code for tokens")
+                            else:
+                                st.error("Please enter the authorization code")
         
         # JSON Configuration Upload
         st.subheader("Channel Configuration")
@@ -495,6 +531,10 @@ def main():
             # Show saved authentication if available
             if 'auth_json' in st.session_state:
                 st.info("✅ Authentication data is ready for download above")
+                
+            # Show auto-authentication status
+            if 'auto_authenticated' in st.session_state:
+                st.success("🤖 Automatically authenticated from URL!")
         
         # Streaming settings
         st.subheader("⚙️ Streaming Settings")
@@ -522,6 +562,10 @@ def main():
             3. Upload the modified JSON file in future sessions
             4. No need to re-authenticate each time!
             """)
+            
+        # Show current authentication status
+        if 'youtube_service' in st.session_state and 'channel_info' in st.session_state:
+            st.success("🔐 Currently authenticated and ready to stream!")
     
     with col2:
         st.header("📊 Status & Controls")
