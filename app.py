@@ -487,8 +487,8 @@ def main():
                 st.error("❌ Stream key is required!")
             else:
                 # Create YouTube live stream if requested
-               if auto_create and 'youtube_service' in st.session_state:
-                   service = st.session_state['youtube_service']
+                if auto_create and 'youtube_service' in st.session_state:
+                    service = st.session_state['youtube_service']
                     if service:
                         scheduled_time = datetime.combine(date, time_val)
                         live_info = create_live_stream(service, stream_title, stream_description, scheduled_time)
@@ -496,15 +496,15 @@ def main():
                             st.success(f"✅ Live stream created!")
                             st.info(f"Watch URL: {live_info['watch_url']}")
                             stream_key = live_info['stream_key']
-               elif auto_create and 'channel_config' in st.session_state and selected_channel and 'auth' in selected_channel:
-                   service = create_youtube_service(selected_channel['auth'])
-                   if service:
-                       scheduled_time = datetime.combine(date, time_val)
-                       live_info = create_live_stream(service, stream_title, stream_description, scheduled_time)
-                       if live_info:
-                           st.success(f"✅ Live stream created!")
-                           st.info(f"Watch URL: {live_info['watch_url']}")
-                           stream_key = live_info['stream_key']
+                elif auto_create and 'channel_config' in st.session_state and selected_channel and 'auth' in selected_channel:
+                    service = create_youtube_service(selected_channel['auth'])
+                    if service:
+                        scheduled_time = datetime.combine(date, time_val)
+                        live_info = create_live_stream(service, stream_title, stream_description, scheduled_time)
+                        if live_info:
+                            st.success(f"✅ Live stream created!")
+                            st.info(f"Watch URL: {live_info['watch_url']}")
+                            stream_key = live_info['stream_key']
                 
                 # Start streaming
                 st.session_state['streaming'] = True
