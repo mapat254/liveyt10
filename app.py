@@ -7,71 +7,100 @@ import json
 import streamlit.components.v1 as components
 from datetime import datetime, timedelta
 import urllib.parse
-import requests
 import sqlite3
 from pathlib import Path
 
-# Install required packages
+# Install required packages if not available
+def install_package(package):
+    try:
+        __import__(package.split('==')[0].replace('-', '_'))
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+# Install streamlit first
 try:
     import streamlit as st
 except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "streamlit"])
+    install_package("streamlit>=1.28.0")
     import streamlit as st
 
+# Install other packages
+packages = [
+    "google-auth>=2.17.0",
+    "google-auth-oauthlib>=1.0.0", 
+    "google-api-python-client>=2.88.0",
+    "requests>=2.31.0"
+]
+
+for package in packages:
+    try:
+        if 'google-auth' in package:
+            import google.auth
+        elif 'google-api' in package:
+            from googleapiclient.discovery import build
+        elif 'requests' in package:
+            import requests
+    except ImportError:
+        install_package(package)
+
+# Now import all required modules
 try:
     import google.auth
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
     from google_auth_oauthlib.flow import Flow
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "google-auth", "google-auth-oauthlib", "google-api-python-client"])
-    import google.auth
-    from google.oauth2.credentials import Credentials
-    from googleapiclient.discovery import build
-    from google_auth_oauthlib.flow import Flow
+    import requests
+except ImportError as e:
+    st.error(f"Error importing required modules: {e}")
+    st.stop()
 
 # Initialize database for persistent logs
 def init_database():
     """Initialize SQLite database for persistent logs"""
-    db_path = Path("streaming_logs.db")
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    # Create logs table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS streaming_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            log_type TEXT NOT NULL,
-            message TEXT NOT NULL,
-            video_file TEXT,
-            stream_key TEXT,
-            channel_name TEXT
-        )
-    ''')
-    
-    # Create streaming_sessions table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS streaming_sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT UNIQUE NOT NULL,
-            start_time TEXT NOT NULL,
-            end_time TEXT,
-            video_file TEXT,
-            stream_title TEXT,
-            stream_description TEXT,
-            tags TEXT,
-            category TEXT,
-            privacy_status TEXT,
-            made_for_kids BOOLEAN,
-            channel_name TEXT,
-            status TEXT DEFAULT 'active'
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
+    try:
+        db_path = Path("streaming_logs.db")
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Create logs table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS streaming_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                log_type TEXT NOT NULL,
+                message TEXT NOT NULL,
+                video_file TEXT,
+                stream_key TEXT,
+                channel_name TEXT
+            )
+        ''')
+        
+        # Create streaming_sessions table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS streaming_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT UNIQUE NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT,
+                video_file TEXT,
+                stream_title TEXT,
+                stream_description TEXT,
+                tags TEXT,
+                category TEXT,
+                privacy_status TEXT,
+                made_for_kids BOOLEAN,
+                channel_name TEXT,
+                status TEXT DEFAULT 'active'
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        st.error(f"Database initialization error: {e}")
+        return False
 
 def log_to_database(session_id, log_type, message, video_file=None, stream_key=None, channel_name=None):
     """Log message to database"""
@@ -212,33 +241,6 @@ def exchange_code_for_tokens(client_config, auth_code):
     except Exception as e:
         st.error(f"Error exchanging code for tokens: {e}")
         return None
-
-def load_channel_config(json_file):
-    """Load channel configuration from JSON file"""
-    try:
-        config = json.load(json_file)
-        return config
-    except Exception as e:
-        st.error(f"Error loading JSON file: {e}")
-        return None
-
-def validate_channel_config(config):
-    """Validate channel configuration structure"""
-    required_fields = ['channels']
-    for field in required_fields:
-        if field not in config:
-            return False, f"Missing required field: {field}"
-    
-    if not isinstance(config['channels'], list):
-        return False, "Channels must be a list"
-    
-    for i, channel in enumerate(config['channels']):
-        required_channel_fields = ['name', 'stream_key']
-        for field in required_channel_fields:
-            if field not in channel:
-                return False, f"Channel {i+1} missing required field: {field}"
-    
-    return True, "Valid configuration"
 
 def create_youtube_service(credentials_dict):
     """Create YouTube API service from credentials"""
@@ -396,7 +398,7 @@ def run_ffmpeg(video_path, stream_key, is_shorts, log_callback, rtmp_url=None, s
         cmd += scale.split()
     cmd.append(output_url)
     
-    start_msg = f"🚀 Starting FFmpeg: {' '.join(cmd[:8])}... [RTMP URL hidden for security]"
+    start_msg = f"🚀 Starting FFmpeg streaming to YouTube"
     log_callback(start_msg)
     if session_id:
         log_to_database(session_id, "INFO", start_msg, video_path)
@@ -424,28 +426,6 @@ def run_ffmpeg(video_path, stream_key, is_shorts, log_callback, rtmp_url=None, s
         log_callback(final_msg)
         if session_id:
             log_to_database(session_id, "INFO", final_msg, video_path)
-
-def get_url_params():
-    """Get URL parameters using JavaScript"""
-    js_code = """
-    <script>
-        const urlParams = new URLSearchParams(window.location.search);
-        const code = urlParams.get('code');
-        const scope = urlParams.get('scope');
-        
-        if (code) {
-            // Send code to Streamlit
-            window.parent.postMessage({
-                type: 'streamlit:setComponentValue',
-                value: {
-                    code: code,
-                    scope: scope
-                }
-            }, '*');
-        }
-    </script>
-    """
-    return components.html(js_code, height=0)
 
 def auto_process_auth_code():
     """Automatically process authorization code from URL"""
@@ -489,24 +469,6 @@ def auto_process_auth_code():
                                 st.session_state['youtube_service'] = service
                                 st.session_state['channel_info'] = channel
                                 
-                                # Create JSON config
-                                json_config = {
-                                    "channels": [
-                                        {
-                                            "name": channel['snippet']['title'],
-                                            "stream_key": "will-be-generated",
-                                            "description": channel['snippet'].get('description', ''),
-                                            "auth": creds_dict
-                                        }
-                                    ],
-                                    "default_settings": {
-                                        "quality": "1080p",
-                                        "privacy": "public",
-                                        "auto_start": False
-                                    }
-                                }
-                                
-                                st.session_state['auto_generated_config'] = json_config
                                 st.success(f"✅ Successfully connected to: {channel['snippet']['title']}")
                                 
                                 # Clear URL parameters
@@ -541,13 +503,15 @@ def get_youtube_categories():
 def main():
     # Page configuration must be the first Streamlit command
     st.set_page_config(
-        page_title="Advanced YouTube Live Streaming",
+        page_title="YouTube Live Streaming Platform",
         page_icon="📺",
         layout="wide"
     )
     
     # Initialize database
-    init_database()
+    if not init_database():
+        st.error("Failed to initialize database. Some features may not work.")
+        return
     
     # Initialize session state
     if 'session_id' not in st.session_state:
@@ -556,7 +520,7 @@ def main():
     if 'live_logs' not in st.session_state:
         st.session_state['live_logs'] = []
     
-    st.title("🎥 Advanced YouTube Live Streaming Platform")
+    st.title("🎥 YouTube Live Streaming Platform")
     st.markdown("---")
     
     # Auto-process authorization code if present
@@ -622,54 +586,8 @@ def main():
                                             st.success(f"🎉 Connected to: {channel['snippet']['title']}")
                                             st.session_state['youtube_service'] = service
                                             st.session_state['channel_info'] = channel
-                                            
-                                            # Create JSON config
-                                            json_config = {
-                                                "channels": [
-                                                    {
-                                                        "name": channel['snippet']['title'],
-                                                        "stream_key": "will-be-generated",
-                                                        "description": channel['snippet'].get('description', ''),
-                                                        "auth": creds_dict
-                                                    }
-                                                ],
-                                                "default_settings": {
-                                                    "quality": "1080p",
-                                                    "privacy": "public",
-                                                    "auto_start": False
-                                                }
-                                            }
-                                            
-                                            st.session_state['auto_generated_config'] = json_config
                         else:
                             st.error("Please enter the authorization code")
-        
-        # Show auto-generated config download
-        if 'auto_generated_config' in st.session_state:
-            st.markdown("---")
-            st.subheader("📥 Download Generated Config")
-            config_json = json.dumps(st.session_state['auto_generated_config'], indent=2)
-            st.download_button(
-                label="📄 Download JSON Config",
-                data=config_json,
-                file_name="youtube_config.json",
-                mime="application/json"
-            )
-            st.info("💡 Save this file for future use!")
-        
-        # JSON Configuration Upload
-        st.subheader("Channel Configuration")
-        json_file = st.file_uploader("Upload JSON Configuration", type=['json'])
-        
-        if json_file:
-            config = load_channel_config(json_file)
-            if config:
-                is_valid, message = validate_channel_config(config)
-                if is_valid:
-                    st.success("✅ Valid configuration loaded")
-                    st.session_state['channel_config'] = config
-                else:
-                    st.error(f"❌ Invalid configuration: {message}")
         
         # Log Management
         st.markdown("---")
@@ -766,37 +684,6 @@ def main():
                     error_msg = f"Error getting stream key: {e}"
                     st.error(error_msg)
                     log_to_database(st.session_state['session_id'], "ERROR", error_msg)
-        
-        # Channel selection from JSON config
-        elif 'channel_config' in st.session_state:
-            st.subheader("📺 Channel Selection")
-            config = st.session_state['channel_config']
-            channel_options = [ch['name'] for ch in config['channels']]
-            selected_channel_name = st.selectbox("Select channel", channel_options)
-            
-            # Find selected channel
-            selected_channel = next((ch for ch in config['channels'] if ch['name'] == selected_channel_name), None)
-            
-            if selected_channel:
-                if 'current_stream_key' not in st.session_state:
-                    st.session_state['current_stream_key'] = selected_channel['stream_key']
-                st.info(f"Using stream key from: {selected_channel_name}")
-                
-                # Display channel info if auth is available
-                if 'auth' in selected_channel:
-                    st.subheader("🔐 Channel Authentication")
-                    if st.button("Verify Authentication"):
-                        service = create_youtube_service(selected_channel['auth'])
-                        if service:
-                            channels = get_channel_info(service)
-                            if channels:
-                                channel = channels[0]
-                                st.success(f"✅ Authenticated as: {channel['snippet']['title']}")
-                                st.write(f"Subscribers: {channel['statistics'].get('subscriberCount', 'Hidden')}")
-                                st.write(f"Total Views: {channel['statistics'].get('viewCount', '0')}")
-                                log_to_database(st.session_state['session_id'], "INFO", f"Channel authenticated: {channel['snippet']['title']}")
-                            else:
-                                st.error("❌ Could not fetch channel information")
         else:
             st.subheader("🔑 Manual Stream Key")
             
@@ -805,16 +692,16 @@ def main():
             manual_stream_key = st.text_input("Stream Key", 
                                      value=current_key, 
                                      type="password",
-                                     help="Enter your YouTube stream key or get one using the button above")
+                                     help="Enter your YouTube stream key or get one using OAuth above")
             
             # Update session state with manual input
             if manual_stream_key:
                 st.session_state['current_stream_key'] = manual_stream_key
             
             if current_key:
-                st.success("✅ Using generated stream key")
+                st.success("✅ Stream key ready")
             else:
-                st.info("💡 Upload OAuth JSON and click 'Get Stream Key' for automatic key generation")
+                st.info("💡 Upload OAuth JSON and authorize for automatic key generation")
         
         # Enhanced Live Stream Settings
         st.subheader("📝 Live Stream Settings")
@@ -869,9 +756,6 @@ def main():
             custom_rtmp = st.text_input("🌐 Custom RTMP URL (optional)")
             enable_dvr = st.checkbox("📹 Enable DVR", value=True)
             enable_content_encryption = st.checkbox("🔐 Enable Content Encryption")
-            
-            # Thumbnail upload
-            thumbnail_file = st.file_uploader("🖼️ Custom Thumbnail", type=['jpg', 'jpeg', 'png'])
             
             # Monetization settings
             st.subheader("💰 Monetization")
@@ -940,27 +824,6 @@ def main():
                             st.session_state['live_broadcast_info'] = live_info
                             stream_key = live_info['stream_key']
                             log_to_database(st.session_state['session_id'], "INFO", f"YouTube Live created: {live_info['watch_url']}")
-                elif auto_create and 'channel_config' in st.session_state and selected_channel and 'auth' in selected_channel:
-                    service = create_youtube_service(selected_channel['auth'])
-                    if service:
-                        scheduled_time = datetime.combine(date, time_val)
-                        live_info = create_live_stream(
-                            service, 
-                            stream_title, 
-                            stream_description, 
-                            scheduled_time,
-                            tags,
-                            category_id,
-                            privacy_status,
-                            made_for_kids
-                        )
-                        if live_info:
-                            st.success(f"✅ Live stream created!")
-                            st.info(f"Watch URL: {live_info['watch_url']}")
-                            st.session_state['current_stream_key'] = live_info['stream_key']
-                            st.session_state['live_broadcast_info'] = live_info
-                            stream_key = live_info['stream_key']
-                            log_to_database(st.session_state['session_id'], "INFO", f"YouTube Live created: {live_info['watch_url']}")
                 
                 # Start streaming
                 st.session_state['streaming'] = True
@@ -990,8 +853,6 @@ def main():
             if 'stream_start_time' in st.session_state:
                 del st.session_state['stream_start_time']
             os.system("pkill ffmpeg")
-            if os.path.exists("temp_video.mp4"):
-                os.remove("temp_video.mp4")
             st.warning("⏸️ Streaming stopped!")
             log_to_database(st.session_state['session_id'], "INFO", "Streaming stopped by user")
             st.rerun()
@@ -1012,11 +873,6 @@ def main():
         
         if 'live_logs' in st.session_state:
             st.metric("Live Log Entries", len(st.session_state['live_logs']))
-        
-        # Channel info display
-        if 'channel_config' in st.session_state:
-            config = st.session_state['channel_config']
-            st.metric("Configured Channels", len(config['channels']))
         
         # Quick actions
         st.subheader("⚡ Quick Actions")
