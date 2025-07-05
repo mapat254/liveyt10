@@ -133,6 +133,34 @@ def create_youtube_service(credentials_dict):
         st.error(f"Error creating YouTube service: {e}")
         return None
 
+def get_stream_key_only(service):
+    """Get stream key without creating broadcast"""
+    try:
+        # Create a simple live stream to get stream key
+        stream_request = service.liveStreams().insert(
+            part="snippet,cdn",
+            body={
+                "snippet": {
+                    "title": f"Stream Key Generator - {datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                },
+                "cdn": {
+                    "resolution": "1080p",
+                    "frameRate": "30fps",
+                    "ingestionType": "rtmp"
+                }
+            }
+        )
+        stream_response = stream_request.execute()
+        
+        return {
+            "stream_key": stream_response['cdn']['ingestionInfo']['streamName'],
+            "stream_url": stream_response['cdn']['ingestionInfo']['ingestionAddress'],
+            "stream_id": stream_response['id']
+        }
+    except Exception as e:
+        st.error(f"Error getting stream key: {e}")
+        return None
+
 def get_channel_info(service, channel_id=None):
     """Get channel information from YouTube API"""
     try:
@@ -165,7 +193,8 @@ def create_live_stream(service, title, description, scheduled_start_time):
                     "description": description
                 },
                 "cdn": {
-                    "format": "1080p",
+                    "resolution": "1080p",
+                    "frameRate": "30fps",
                     "ingestionType": "rtmp"
                 }
             }
@@ -533,24 +562,22 @@ def main():
             if st.button("🔑 Get Stream Key"):
                 try:
                     service = st.session_state['youtube_service']
-                    # Create a live stream to get stream key
-                    stream_request = service.liveStreams().insert(
-                        part="snippet,cdn",
-                        body={
-                            "snippet": {
-                                "title": "Temporary Stream for Key"
-                            },
-                            "cdn": {
-                                "format": "1080p",
-                                "ingestionType": "rtmp"
-                            }
-                        }
-                    )
-                    stream_response = stream_request.execute()
-                    stream_key = stream_response['cdn']['ingestionInfo']['streamName']
-                    st.session_state['current_stream_key'] = stream_key
-                    st.success("✅ Stream key obtained!")
-                    st.code(stream_key)
+                    with st.spinner("Getting stream key..."):
+                        stream_info = get_stream_key_only(service)
+                        if stream_info:
+                            stream_key = stream_info['stream_key']
+                            st.session_state['current_stream_key'] = stream_key
+                            st.session_state['current_stream_info'] = stream_info
+                            st.success("✅ Stream key obtained!")
+                            
+                            # Display stream information
+                            col_sk1, col_sk2 = st.columns(2)
+                            with col_sk1:
+                                st.text_input("Stream Key", value=stream_key, type="password")
+                            with col_sk2:
+                                st.text_input("RTMP URL", value=stream_info['stream_url'])
+                            
+                            st.info("💡 Use these credentials in your streaming software (OBS, etc.)")
                 except Exception as e:
                     st.error(f"Error getting stream key: {e}")
         
@@ -584,9 +611,18 @@ def main():
                                 st.error("❌ Could not fetch channel information")
         else:
             st.subheader("🔑 Manual Stream Key")
+            
+            # Check if we have a current stream key
+            current_key = st.session_state.get('current_stream_key', '')
             stream_key = st.text_input("Stream Key", 
-                                     value=st.session_state.get('current_stream_key', ''), 
-                                     type="password")
+                                     value=current_key, 
+                                     type="password",
+                                     help="Enter your YouTube stream key or get one using the button above")
+            
+            if current_key:
+                st.success("✅ Using generated stream key")
+            else:
+                st.info("💡 Upload OAuth JSON and click 'Get Stream Key' for automatic key generation")
         
         # Streaming settings
         st.subheader("⚙️ Streaming Settings")
