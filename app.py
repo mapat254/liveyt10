@@ -592,7 +592,8 @@ def main():
             selected_channel = next((ch for ch in config['channels'] if ch['name'] == selected_channel_name), None)
             
             if selected_channel:
-                stream_key = selected_channel['stream_key']
+                if 'current_stream_key' not in st.session_state:
+                    st.session_state['current_stream_key'] = selected_channel['stream_key']
                 st.info(f"Using stream key from: {selected_channel_name}")
                 
                 # Display channel info if auth is available
@@ -614,10 +615,14 @@ def main():
             
             # Check if we have a current stream key
             current_key = st.session_state.get('current_stream_key', '')
-            stream_key = st.text_input("Stream Key", 
+            manual_stream_key = st.text_input("Stream Key", 
                                      value=current_key, 
                                      type="password",
                                      help="Enter your YouTube stream key or get one using the button above")
+            
+            # Update session state with manual input
+            if manual_stream_key:
+                st.session_state['current_stream_key'] = manual_stream_key
             
             if current_key:
                 st.success("✅ Using generated stream key")
@@ -654,6 +659,9 @@ def main():
         
         # Control buttons
         if st.button("▶️ Start Streaming", type="primary"):
+            # Get the current stream key
+            stream_key = st.session_state.get('current_stream_key', '')
+            
             if not video_path:
                 st.error("❌ Please select or upload a video!")
             elif not stream_key:
@@ -668,6 +676,7 @@ def main():
                         if live_info:
                             st.success(f"✅ Live stream created!")
                             st.info(f"Watch URL: {live_info['watch_url']}")
+                            st.session_state['current_stream_key'] = live_info['stream_key']
                             stream_key = live_info['stream_key']
                 elif auto_create and 'channel_config' in st.session_state and selected_channel and 'auth' in selected_channel:
                     service = create_youtube_service(selected_channel['auth'])
@@ -677,6 +686,7 @@ def main():
                         if live_info:
                             st.success(f"✅ Live stream created!")
                             st.info(f"Watch URL: {live_info['watch_url']}")
+                            st.session_state['current_stream_key'] = live_info['stream_key']
                             stream_key = live_info['stream_key']
                 
                 # Start streaming
