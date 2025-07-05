@@ -66,6 +66,9 @@ def generate_auth_url(client_config):
 def exchange_code_for_tokens(client_config, auth_code):
     """Exchange authorization code for access and refresh tokens"""
     try:
+        # Clean the auth code (remove any whitespace or special characters)
+        auth_code = auth_code.strip()
+        
         token_data = {
             'client_id': client_config['client_id'],
             'client_secret': client_config['client_secret'],
@@ -80,7 +83,16 @@ def exchange_code_for_tokens(client_config, auth_code):
             tokens = response.json()
             return tokens
         else:
-            st.error(f"Token exchange failed: {response.text}")
+            error_data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {'error': response.text}
+            if 'error' in error_data:
+                if error_data['error'] == 'invalid_grant':
+                    st.error("❌ Authorization code expired or already used. Please get a new authorization code.")
+                elif error_data['error'] == 'invalid_request':
+                    st.error("❌ Invalid request. Please check your OAuth configuration.")
+                else:
+                    st.error(f"❌ Token exchange failed: {error_data.get('error_description', error_data['error'])}")
+            else:
+                st.error(f"❌ Token exchange failed: {response.text}")
             return None
     except Exception as e:
         st.error(f"Error exchanging code for tokens: {e}")
@@ -276,16 +288,18 @@ def main():
                             auto_auth_code = None
                     
                     if auto_auth_code:
-                        st.info("🔄 Processing authorization code from URL...")
-                        st.write(f"Debug: Found auth code: {auto_auth_code[:20]}...")
-                        
-                        # Automatically process the auth code
-                        if 'tokens_processed' not in st.session_state:
+                        # Check if this code was already processed
+                        current_code_hash = hash(auto_auth_code)
+                        if st.session_state.get('last_processed_code_hash') != current_code_hash:
+                            st.info("🔄 Processing authorization code from URL...")
+                            st.write(f"Debug: Found auth code: {auto_auth_code[:20]}...")
+                            
+                            # Process the auth code
                             tokens = exchange_code_for_tokens(oauth_config, auto_auth_code)
                             if tokens:
                                 st.success("✅ Tokens obtained successfully!")
                                 st.session_state['youtube_tokens'] = tokens
-                                st.session_state['tokens_processed'] = True
+                                st.session_state['last_processed_code_hash'] = current_code_hash
                                 
                                 # Create credentials for YouTube service
                                 creds_dict = {
@@ -360,11 +374,46 @@ def main():
                                         # Force rerun to refresh the page
                                         st.rerun()
                             else:
-                                st.error("❌ Failed to exchange authorization code for tokens")
-                                st.session_state['tokens_processed'] = True  # Prevent infinite retry
+                                st.session_state['last_processed_code_hash'] = current_code_hash
+                                st.error("❌ Failed to process authorization code. Please try getting a new one.")
+                                
+                                # Clear URL parameters on error
+                                try:
+                                    st.query_params.clear()
+                                except:
+                                    try:
+                                        st.experimental_set_query_params()
+                                    except:
+                                        pass
+                        else:
+                            st.warning("⚠️ This authorization code was already processed. Please get a new one if needed.")
+                        
+                        # Show button to get new auth code
+                        if st.button("🔄 Get New Authorization Code"):
+                            # Clear session state and redirect to auth
+                            for key in ['last_processed_code_hash', 'youtube_tokens', 'youtube_service', 'channel_info', 'auto_authenticated']:
+                                if key in st.session_state:
+                                    del st.session_state[key]
+                            
+                            # Clear URL parameters
+                            try:
+                                st.query_params.clear()
+                            except:
+                                try:
+                                    st.experimental_set_query_params()
+                                except:
+                                    pass
+                            
+                            st.rerun()
                     else:
                         # Manual auth code input (fallback)
-                        st.info("After authorization, you'll be redirected back automatically, or paste the code below:")
+                        st.info("💡 **Instructions:**")
+                        st.markdown("""
+                        1. Click the authorization link above
+                        2. Grant permissions to your YouTube account  
+                        3. You'll be redirected back automatically
+                        4. Or copy the code from the URL and paste below
+                        """)
                         
                         # Authorization code input
                         auth_code = st.text_input("Authorization Code (optional)", type="password")
@@ -376,8 +425,6 @@ def main():
                                     st.success("✅ Tokens obtained successfully!")
                                     st.session_state['youtube_tokens'] = tokens
                                     st.rerun()
-                                else:
-                                    st.error("❌ Failed to exchange code for tokens")
                             else:
                                 st.error("Please enter the authorization code")
                     
@@ -393,10 +440,16 @@ def main():
                             except:
                                 st.write("Could not retrieve URL parameters")
                         
-                        if 'tokens_processed' in st.session_state:
-                            st.write("Tokens processed:", st.session_state['tokens_processed'])
+                        if 'last_processed_code_hash' in st.session_state:
+                            st.write("Last processed code hash:", st.session_state['last_processed_code_hash'])
                         
                         st.write("Session state keys:", list(st.session_state.keys()))
+                        
+                        # Button to clear all session state
+                        if st.button("🗑️ Clear All Session Data"):
+                            st.session_state.clear()
+                            st.success("Session data cleared!")
+                            st.rerun()
         
         # JSON Configuration Upload
         st.subheader("Channel Configuration")
