@@ -95,6 +95,24 @@ def init_database():
             )
         ''')
         
+        # Create auth_credentials table for persistent authentication
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS auth_credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id TEXT UNIQUE NOT NULL,
+                channel_name TEXT NOT NULL,
+                access_token TEXT NOT NULL,
+                refresh_token TEXT,
+                token_uri TEXT NOT NULL,
+                client_id TEXT NOT NULL,
+                client_secret TEXT NOT NULL,
+                expires_at TEXT,
+                created_at TEXT NOT NULL,
+                last_used TEXT NOT NULL,
+                is_active BOOLEAN DEFAULT 1
+            )
+        ''')
+        
         conn.commit()
         conn.close()
         return True
@@ -156,6 +174,138 @@ def get_logs_from_database(session_id=None, limit=100):
         st.error(f"Error getting logs from database: {e}")
         return []
 
+def save_auth_credentials(channel_id, channel_name, credentials_dict):
+    """Save authentication credentials to database"""
+    try:
+        conn = sqlite3.connect("streaming_logs.db")
+        cursor = conn.cursor()
+        
+        # Calculate expiry time (1 hour from now as default)
+        expires_at = (datetime.now() + timedelta(hours=1)).isoformat()
+        current_time = datetime.now().isoformat()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO auth_credentials 
+            (channel_id, channel_name, access_token, refresh_token, token_uri, client_id, client_secret, expires_at, created_at, last_used, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            channel_id,
+            channel_name,
+            credentials_dict.get('access_token'),
+            credentials_dict.get('refresh_token'),
+            credentials_dict.get('token_uri', 'https://oauth2.googleapis.com/token'),
+            credentials_dict.get('client_id'),
+            credentials_dict.get('client_secret'),
+            expires_at,
+            current_time,
+            current_time,
+            True
+        ))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        st.error(f"Error saving auth credentials: {e}")
+        return False
+
+def load_auth_credentials():
+    """Load all active authentication credentials from database"""
+    try:
+        conn = sqlite3.connect("streaming_logs.db")
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT channel_id, channel_name, access_token, refresh_token, token_uri, client_id, client_secret, expires_at
+            FROM auth_credentials 
+            WHERE is_active = 1
+            ORDER BY last_used DESC
+        ''')
+        
+        credentials = cursor.fetchall()
+        conn.close()
+        
+        result = []
+        for cred in credentials:
+            channel_id, channel_name, access_token, refresh_token, token_uri, client_id, client_secret, expires_at = cred
+            result.append({
+                'channel_id': channel_id,
+                'channel_name': channel_name,
+                'access_token': access_token,
+                'refresh_token': refresh_token,
+                'token_uri': token_uri,
+                'client_id': client_id,
+                'client_secret': client_secret,
+                'expires_at': expires_at
+            })
+        
+        return result
+    except Exception as e:
+        st.error(f"Error loading auth credentials: {e}")
+        return []
+
+def update_last_used(channel_id):
+    """Update last used timestamp for channel"""
+    try:
+        conn = sqlite3.connect("streaming_logs.db")
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE auth_credentials 
+            SET last_used = ?
+            WHERE channel_id = ?
+        ''', (datetime.now().isoformat(), channel_id))
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        st.error(f"Error updating last used: {e}")
+
+def delete_auth_credentials(channel_id):
+    """Delete authentication credentials from database"""
+    try:
+        conn = sqlite3.connect("streaming_logs.db")
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE auth_credentials 
+            SET is_active = 0
+            WHERE channel_id = ?
+        ''', (channel_id,))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        st.error(f"Error deleting auth credentials: {e}")
+        return False
+
+def refresh_access_token(credentials_dict):
+    """Refresh access token using refresh token"""
+    try:
+        if not credentials_dict.get('refresh_token'):
+            return None
+            
+        token_data = {
+            'client_id': credentials_dict['client_id'],
+            'client_secret': credentials_dict['client_secret'],
+            'refresh_token': credentials_dict['refresh_token'],
+            'grant_type': 'refresh_token'
+        }
+        
+        response = requests.post(credentials_dict['token_uri'], data=token_data)
+        
+        if response.status_code == 200:
+            tokens = response.json()
+            # Update the credentials dict with new access token
+            credentials_dict['access_token'] = tokens['access_token']
+            return credentials_dict
+        else:
+            st.error(f"Token refresh failed: {response.text}")
+            return None
+    except Exception as e:
+        st.error(f"Error refreshing token: {e}")
+        return None
 def save_streaming_session(session_id, video_file, stream_title, stream_description, tags, category, privacy_status, made_for_kids, channel_name):
     """Save streaming session to database"""
     try:
@@ -469,6 +619,13 @@ def auto_process_auth_code():
                                 st.session_state['youtube_service'] = service
                                 st.session_state['channel_info'] = channel
                                 
+                                # Save credentials to database for persistence
+                                save_auth_credentials(
+                                    channel['id'],
+                                    channel['snippet']['title'],
+                                    creds_dict
+                                )
+                                
                                 st.success(f"✅ Successfully connected to: {channel['snippet']['title']}")
                                 
                                 # Clear URL parameters
@@ -519,6 +676,53 @@ def main():
     
     if 'live_logs' not in st.session_state:
         st.session_state['live_logs'] = []
+    
+    # Load saved authentication credentials on startup
+    if 'auth_loaded' not in st.session_state:
+        saved_credentials = load_auth_credentials()
+        if saved_credentials:
+            # Use the most recently used credentials
+            latest_cred = saved_credentials[0]
+            
+            # Try to create YouTube service with saved credentials
+            service = create_youtube_service(latest_cred)
+            if service:
+                try:
+                    channels = get_channel_info(service)
+                    if channels:
+                        channel = channels[0]
+                        st.session_state['youtube_service'] = service
+                        st.session_state['channel_info'] = channel
+                        st.session_state['saved_auth'] = latest_cred
+                        
+                        # Update last used timestamp
+                        update_last_used(latest_cred['channel_id'])
+                        
+                        log_to_database(st.session_state['session_id'], "INFO", f"Auto-loaded saved authentication for: {channel['snippet']['title']}")
+                except Exception as e:
+                    # Try to refresh token if access failed
+                    refreshed_cred = refresh_access_token(latest_cred)
+                    if refreshed_cred:
+                        # Update database with new token
+                        save_auth_credentials(
+                            latest_cred['channel_id'],
+                            latest_cred['channel_name'],
+                            refreshed_cred
+                        )
+                        
+                        # Try again with refreshed token
+                        service = create_youtube_service(refreshed_cred)
+                        if service:
+                            channels = get_channel_info(service)
+                            if channels:
+                                channel = channels[0]
+                                st.session_state['youtube_service'] = service
+                                st.session_state['channel_info'] = channel
+                                st.session_state['saved_auth'] = refreshed_cred
+                                
+                                log_to_database(st.session_state['session_id'], "INFO", f"Auto-loaded refreshed authentication for: {channel['snippet']['title']}")
+        
+        st.session_state['auth_loaded'] = True
     
     st.title("🎥 YouTube Live Streaming Platform")
     st.markdown("---")
@@ -586,12 +790,72 @@ def main():
                                             st.success(f"🎉 Connected to: {channel['snippet']['title']}")
                                             st.session_state['youtube_service'] = service
                                             st.session_state['channel_info'] = channel
+                                            
+                                            # Save credentials to database for persistence
+                                            save_auth_credentials(
+                                                channel['id'],
+                                                channel['snippet']['title'],
+                                                creds_dict
+                                            )
                         else:
                             st.error("Please enter the authorization code")
         
         # Log Management
         st.markdown("---")
         st.subheader("📊 Log Management")
+        
+        # Saved Channels Management
+        saved_credentials = load_auth_credentials()
+        if saved_credentials:
+            st.markdown("---")
+            st.subheader("💾 Saved Channels")
+            
+            for i, cred in enumerate(saved_credentials):
+                col_ch1, col_ch2, col_ch3 = st.columns([3, 1, 1])
+                
+                with col_ch1:
+                    st.write(f"**{cred['channel_name']}**")
+                    st.caption(f"Last used: {cred['expires_at'][:16]}")
+                
+                with col_ch2:
+                    if st.button("🔄 Use", key=f"use_channel_{i}"):
+                        # Load this channel
+                        service = create_youtube_service(cred)
+                        if service:
+                            try:
+                                channels = get_channel_info(service)
+                                if channels:
+                                    channel = channels[0]
+                                    st.session_state['youtube_service'] = service
+                                    st.session_state['channel_info'] = channel
+                                    st.session_state['saved_auth'] = cred
+                                    
+                                    # Update last used
+                                    update_last_used(cred['channel_id'])
+                                    
+                                    st.success(f"✅ Switched to: {channel['snippet']['title']}")
+                                    st.rerun()
+                            except Exception as e:
+                                # Try to refresh token
+                                refreshed_cred = refresh_access_token(cred)
+                                if refreshed_cred:
+                                    save_auth_credentials(
+                                        cred['channel_id'],
+                                        cred['channel_name'],
+                                        refreshed_cred
+                                    )
+                                    st.success("🔄 Token refreshed, try again")
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Authentication expired, please re-authorize")
+                        else:
+                            st.error("❌ Failed to create service")
+                
+                with col_ch3:
+                    if st.button("🗑️", key=f"delete_channel_{i}", help="Remove saved channel"):
+                        if delete_auth_credentials(cred['channel_id']):
+                            st.success("✅ Channel removed")
+                            st.rerun()
         
         col_log1, col_log2 = st.columns(2)
         with col_log1:
@@ -654,10 +918,29 @@ def main():
             with col_ch1:
                 st.write(f"**Channel:** {channel['snippet']['title']}")
                 st.write(f"**Subscribers:** {channel['statistics'].get('subscriberCount', 'Hidden')}")
+                
+                # Show if this is from saved auth
+                if 'saved_auth' in st.session_state:
+                    st.caption("🔒 Using saved authentication")
             
             with col_ch2:
                 st.write(f"**Views:** {channel['statistics'].get('viewCount', '0')}")
                 st.write(f"**Videos:** {channel['statistics'].get('videoCount', '0')}")
+                
+                # Logout button
+                if st.button("🚪 Logout"):
+                    # Clear session state
+                    if 'youtube_service' in st.session_state:
+                        del st.session_state['youtube_service']
+                    if 'channel_info' in st.session_state:
+                        del st.session_state['channel_info']
+                    if 'saved_auth' in st.session_state:
+                        del st.session_state['saved_auth']
+                    if 'current_stream_key' in st.session_state:
+                        del st.session_state['current_stream_key']
+                    
+                    st.success("✅ Logged out successfully")
+                    st.rerun()
             
             # Get stream key from YouTube
             if st.button("🔑 Get Stream Key"):
