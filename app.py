@@ -8,6 +8,8 @@ import streamlit.components.v1 as components
 from datetime import datetime, timedelta
 import urllib.parse
 import requests
+import sqlite3
+from pathlib import Path
 
 # Install required packages
 try:
@@ -27,6 +29,131 @@ except ImportError:
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
     from google_auth_oauthlib.flow import Flow
+
+# Initialize database for persistent logs
+def init_database():
+    """Initialize SQLite database for persistent logs"""
+    db_path = Path("streaming_logs.db")
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Create logs table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS streaming_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            log_type TEXT NOT NULL,
+            message TEXT NOT NULL,
+            video_file TEXT,
+            stream_key TEXT,
+            channel_name TEXT
+        )
+    ''')
+    
+    # Create streaming_sessions table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS streaming_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT UNIQUE NOT NULL,
+            start_time TEXT NOT NULL,
+            end_time TEXT,
+            video_file TEXT,
+            stream_title TEXT,
+            stream_description TEXT,
+            tags TEXT,
+            category TEXT,
+            privacy_status TEXT,
+            made_for_kids BOOLEAN,
+            channel_name TEXT,
+            status TEXT DEFAULT 'active'
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+def log_to_database(session_id, log_type, message, video_file=None, stream_key=None, channel_name=None):
+    """Log message to database"""
+    try:
+        conn = sqlite3.connect("streaming_logs.db")
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO streaming_logs 
+            (timestamp, session_id, log_type, message, video_file, stream_key, channel_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            datetime.now().isoformat(),
+            session_id,
+            log_type,
+            message,
+            video_file,
+            stream_key,
+            channel_name
+        ))
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        st.error(f"Error logging to database: {e}")
+
+def get_logs_from_database(session_id=None, limit=100):
+    """Get logs from database"""
+    try:
+        conn = sqlite3.connect("streaming_logs.db")
+        cursor = conn.cursor()
+        
+        if session_id:
+            cursor.execute('''
+                SELECT timestamp, log_type, message, video_file, channel_name
+                FROM streaming_logs 
+                WHERE session_id = ?
+                ORDER BY timestamp DESC 
+                LIMIT ?
+            ''', (session_id, limit))
+        else:
+            cursor.execute('''
+                SELECT timestamp, log_type, message, video_file, channel_name
+                FROM streaming_logs 
+                ORDER BY timestamp DESC 
+                LIMIT ?
+            ''', (limit,))
+        
+        logs = cursor.fetchall()
+        conn.close()
+        return logs
+    except Exception as e:
+        st.error(f"Error getting logs from database: {e}")
+        return []
+
+def save_streaming_session(session_id, video_file, stream_title, stream_description, tags, category, privacy_status, made_for_kids, channel_name):
+    """Save streaming session to database"""
+    try:
+        conn = sqlite3.connect("streaming_logs.db")
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO streaming_sessions 
+            (session_id, start_time, video_file, stream_title, stream_description, tags, category, privacy_status, made_for_kids, channel_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            session_id,
+            datetime.now().isoformat(),
+            video_file,
+            stream_title,
+            stream_description,
+            tags,
+            category,
+            privacy_status,
+            made_for_kids,
+            channel_name
+        ))
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        st.error(f"Error saving streaming session: {e}")
 
 def load_google_oauth_config(json_file):
     """Load Google OAuth configuration from downloaded JSON file"""
@@ -181,8 +308,8 @@ def get_channel_info(service, channel_id=None):
         st.error(f"Error fetching channel info: {e}")
         return []
 
-def create_live_stream(service, title, description, scheduled_start_time):
-    """Create a live stream on YouTube"""
+def create_live_stream(service, title, description, scheduled_start_time, tags=None, category_id="20", privacy_status="public", made_for_kids=False):
+    """Create a live stream on YouTube with complete settings"""
     try:
         # Create live stream
         stream_request = service.liveStreams().insert(
@@ -201,19 +328,35 @@ def create_live_stream(service, title, description, scheduled_start_time):
         )
         stream_response = stream_request.execute()
         
+        # Prepare broadcast body
+        broadcast_body = {
+            "snippet": {
+                "title": title,
+                "description": description,
+                "scheduledStartTime": scheduled_start_time.isoformat()
+            },
+            "status": {
+                "privacyStatus": privacy_status,
+                "selfDeclaredMadeForKids": made_for_kids
+            },
+            "contentDetails": {
+                "enableAutoStart": True,
+                "enableAutoStop": True
+            }
+        }
+        
+        # Add tags if provided
+        if tags:
+            broadcast_body["snippet"]["tags"] = tags
+            
+        # Add category if provided
+        if category_id:
+            broadcast_body["snippet"]["categoryId"] = category_id
+        
         # Create live broadcast
         broadcast_request = service.liveBroadcasts().insert(
-            part="snippet,status",
-            body={
-                "snippet": {
-                    "title": title,
-                    "description": description,
-                    "scheduledStartTime": scheduled_start_time.isoformat()
-                },
-                "status": {
-                    "privacyStatus": "public"
-                }
-            }
+            part="snippet,status,contentDetails",
+            body=broadcast_body
         )
         broadcast_response = broadcast_request.execute()
         
@@ -229,14 +372,16 @@ def create_live_stream(service, title, description, scheduled_start_time):
             "stream_key": stream_response['cdn']['ingestionInfo']['streamName'],
             "stream_url": stream_response['cdn']['ingestionInfo']['ingestionAddress'],
             "broadcast_id": broadcast_response['id'],
-            "watch_url": f"https://www.youtube.com/watch?v={broadcast_response['id']}"
+            "stream_id": stream_response['id'],
+            "watch_url": f"https://www.youtube.com/watch?v={broadcast_response['id']}",
+            "broadcast_response": broadcast_response
         }
     except Exception as e:
         st.error(f"Error creating live stream: {e}")
         return None
 
-def run_ffmpeg(video_path, stream_key, is_shorts, log_callback, rtmp_url=None):
-    """Run FFmpeg for streaming"""
+def run_ffmpeg(video_path, stream_key, is_shorts, log_callback, rtmp_url=None, session_id=None):
+    """Run FFmpeg for streaming with enhanced logging"""
     output_url = rtmp_url or f"rtmp://a.rtmp.youtube.com/live2/{stream_key}"
     scale = "-vf scale=720:1280" if is_shorts else ""
     cmd = [
@@ -250,16 +395,35 @@ def run_ffmpeg(video_path, stream_key, is_shorts, log_callback, rtmp_url=None):
     if scale:
         cmd += scale.split()
     cmd.append(output_url)
-    log_callback(f"Menjalankan: {' '.join(cmd)}")
+    
+    start_msg = f"🚀 Starting FFmpeg: {' '.join(cmd[:8])}... [RTMP URL hidden for security]"
+    log_callback(start_msg)
+    if session_id:
+        log_to_database(session_id, "INFO", start_msg, video_path)
+    
     try:
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         for line in process.stdout:
             log_callback(line.strip())
+            if session_id:
+                log_to_database(session_id, "FFMPEG", line.strip(), video_path)
         process.wait()
+        
+        end_msg = "✅ Streaming completed successfully"
+        log_callback(end_msg)
+        if session_id:
+            log_to_database(session_id, "INFO", end_msg, video_path)
+            
     except Exception as e:
-        log_callback(f"Error: {e}")
+        error_msg = f"❌ FFmpeg Error: {e}"
+        log_callback(error_msg)
+        if session_id:
+            log_to_database(session_id, "ERROR", error_msg, video_path)
     finally:
-        log_callback("Streaming selesai atau dihentikan.")
+        final_msg = "⏹️ Streaming session ended"
+        log_callback(final_msg)
+        if session_id:
+            log_to_database(session_id, "INFO", final_msg, video_path)
 
 def get_url_params():
     """Get URL parameters using JavaScript"""
@@ -355,15 +519,44 @@ def auto_process_auth_code():
             else:
                 st.error("❌ OAuth configuration not found. Please upload OAuth JSON first.")
 
+def get_youtube_categories():
+    """Get YouTube video categories"""
+    return {
+        "1": "Film & Animation",
+        "2": "Autos & Vehicles", 
+        "10": "Music",
+        "15": "Pets & Animals",
+        "17": "Sports",
+        "19": "Travel & Events",
+        "20": "Gaming",
+        "22": "People & Blogs",
+        "23": "Comedy",
+        "24": "Entertainment",
+        "25": "News & Politics",
+        "26": "Howto & Style",
+        "27": "Education",
+        "28": "Science & Technology"
+    }
+
 def main():
     # Page configuration must be the first Streamlit command
     st.set_page_config(
-        page_title="Streaming YT by didinchy",
-        page_icon="📈",
+        page_title="Advanced YouTube Live Streaming",
+        page_icon="📺",
         layout="wide"
     )
     
-    st.title("Live Streaming Loss Doll")
+    # Initialize database
+    init_database()
+    
+    # Initialize session state
+    if 'session_id' not in st.session_state:
+        st.session_state['session_id'] = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    if 'live_logs' not in st.session_state:
+        st.session_state['live_logs'] = []
+    
+    st.title("🎥 Advanced YouTube Live Streaming Platform")
     st.markdown("---")
     
     # Auto-process authorization code if present
@@ -372,6 +565,9 @@ def main():
     # Sidebar for configuration
     with st.sidebar:
         st.header("📋 Configuration")
+        
+        # Session info
+        st.info(f"🆔 Session: {st.session_state['session_id']}")
         
         # Google OAuth Configuration
         st.subheader("🔐 Google OAuth Setup")
@@ -475,45 +671,31 @@ def main():
                 else:
                     st.error(f"❌ Invalid configuration: {message}")
         
-        # Sample JSON format
-        with st.expander("📄 Sample JSON Format"):
-            sample_config = {
-                "channels": [
-                    {
-                        "name": "Channel 1",
-                        "stream_key": "your-stream-key-1",
-                        "description": "Channel description",
-                        "auth": {
-                            "client_id": "your-client-id",
-                            "client_secret": "your-client-secret",
-                            "refresh_token": "your-refresh-token",
-                            "token": "your-access-token"
-                        }
-                    }
-                ],
-                "default_settings": {
-                    "quality": "1080p",
-                    "privacy": "public",
-                    "auto_start": False
-                }
-            }
-            st.json(sample_config)
+        # Log Management
+        st.markdown("---")
+        st.subheader("📊 Log Management")
         
-        # Google OAuth JSON format example
-        with st.expander("🔐 Google OAuth JSON Format"):
-            st.write("This is the format you get when downloading OAuth credentials from Google Cloud Console:")
-            oauth_sample = {
-                "web": {
-                    "client_id": "your-client-id.apps.googleusercontent.com",
-                    "project_id": "your-project-id",
-                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                    "token_uri": "https://oauth2.googleapis.com/token",
-                    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-                    "client_secret": "your-client-secret",
-                    "redirect_uris": ["https://your-app.streamlit.app"]
-                }
-            }
-            st.json(oauth_sample)
+        col_log1, col_log2 = st.columns(2)
+        with col_log1:
+            if st.button("🔄 Refresh Logs"):
+                st.rerun()
+        
+        with col_log2:
+            if st.button("🗑️ Clear Session Logs"):
+                st.session_state['live_logs'] = []
+                st.success("Logs cleared!")
+        
+        # Export logs
+        if st.button("📥 Export All Logs"):
+            all_logs = get_logs_from_database(limit=1000)
+            if all_logs:
+                logs_text = "\n".join([f"[{log[0]}] {log[1]}: {log[2]}" for log in all_logs])
+                st.download_button(
+                    label="💾 Download Logs",
+                    data=logs_text,
+                    file_name=f"streaming_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                    mime="text/plain"
+                )
     
     # Main content area
     col1, col2 = st.columns([2, 1])
@@ -522,7 +704,7 @@ def main():
         st.header("🎥 Video & Streaming Setup")
         
         # Video selection
-        video_files = [f for f in os.listdir('.') if f.endswith(('.mp4', '.flv'))]
+        video_files = [f for f in os.listdir('.') if f.endswith(('.mp4', '.flv', '.avi', '.mov', '.mkv'))]
         
         if video_files:
             st.write("📁 Available videos:")
@@ -532,13 +714,14 @@ def main():
             st.info("No video files found in current directory")
         
         # Video upload
-        uploaded_file = st.file_uploader("Or upload new video (mp4/flv - H264/AAC codec)", type=['mp4', '.flv'])
+        uploaded_file = st.file_uploader("Or upload new video", type=['mp4', 'flv', 'avi', 'mov', 'mkv'])
         
         if uploaded_file:
             with open(uploaded_file.name, "wb") as f:
                 f.write(uploaded_file.read())
             st.success("✅ Video uploaded successfully!")
             video_path = uploaded_file.name
+            log_to_database(st.session_state['session_id'], "INFO", f"Video uploaded: {uploaded_file.name}")
         elif selected_video:
             video_path = selected_video
         else:
@@ -569,6 +752,7 @@ def main():
                             st.session_state['current_stream_key'] = stream_key
                             st.session_state['current_stream_info'] = stream_info
                             st.success("✅ Stream key obtained!")
+                            log_to_database(st.session_state['session_id'], "INFO", "Stream key generated successfully")
                             
                             # Display stream information
                             col_sk1, col_sk2 = st.columns(2)
@@ -579,7 +763,9 @@ def main():
                             
                             st.info("💡 Use these credentials in your streaming software (OBS, etc.)")
                 except Exception as e:
-                    st.error(f"Error getting stream key: {e}")
+                    error_msg = f"Error getting stream key: {e}"
+                    st.error(error_msg)
+                    log_to_database(st.session_state['session_id'], "ERROR", error_msg)
         
         # Channel selection from JSON config
         elif 'channel_config' in st.session_state:
@@ -608,6 +794,7 @@ def main():
                                 st.success(f"✅ Authenticated as: {channel['snippet']['title']}")
                                 st.write(f"Subscribers: {channel['statistics'].get('subscriberCount', 'Hidden')}")
                                 st.write(f"Total Views: {channel['statistics'].get('viewCount', '0')}")
+                                log_to_database(st.session_state['session_id'], "INFO", f"Channel authenticated: {channel['snippet']['title']}")
                             else:
                                 st.error("❌ Could not fetch channel information")
         else:
@@ -629,23 +816,69 @@ def main():
             else:
                 st.info("💡 Upload OAuth JSON and click 'Get Stream Key' for automatic key generation")
         
-        # Streaming settings
-        st.subheader("⚙️ Streaming Settings")
-        col_a, col_b = st.columns(2)
+        # Enhanced Live Stream Settings
+        st.subheader("📝 Live Stream Settings")
         
-        with col_a:
+        # Basic settings
+        col_basic1, col_basic2 = st.columns(2)
+        
+        with col_basic1:
+            stream_title = st.text_input("🎬 Stream Title", value="Live Stream", max_chars=100)
+            privacy_status = st.selectbox("🔒 Privacy", ["public", "unlisted", "private"])
+            made_for_kids = st.checkbox("👶 Made for Kids")
+        
+        with col_basic2:
+            categories = get_youtube_categories()
+            category_names = list(categories.values())
+            selected_category_name = st.selectbox("📂 Category", category_names, index=category_names.index("Gaming"))
+            category_id = [k for k, v in categories.items() if v == selected_category_name][0]
+            
             date = st.date_input("📅 Streaming Date")
-            is_shorts = st.checkbox("📱 Shorts Mode (720x1280)")
-        
-        with col_b:
             time_val = st.time_input("⏰ Streaming Time")
-            auto_create = st.checkbox("🤖 Auto-create YouTube Live")
+        
+        # Description
+        stream_description = st.text_area("📄 Stream Description", 
+                                        value="Live streaming session", 
+                                        max_chars=5000,
+                                        height=100)
+        
+        # Tags
+        tags_input = st.text_input("🏷️ Tags (comma separated)", 
+                                 placeholder="gaming, live, stream, youtube")
+        tags = [tag.strip() for tag in tags_input.split(",") if tag.strip()] if tags_input else []
+        
+        if tags:
+            st.write("**Tags:**", ", ".join(tags))
+        
+        # Technical settings
+        with st.expander("🔧 Technical Settings"):
+            col_tech1, col_tech2 = st.columns(2)
+            
+            with col_tech1:
+                is_shorts = st.checkbox("📱 Shorts Mode (720x1280)")
+                auto_create = st.checkbox("🤖 Auto-create YouTube Live")
+                enable_chat = st.checkbox("💬 Enable Live Chat", value=True)
+            
+            with col_tech2:
+                bitrate = st.selectbox("📊 Bitrate", ["1500k", "2500k", "4000k", "6000k"], index=1)
+                framerate = st.selectbox("🎞️ Frame Rate", ["24", "30", "60"], index=1)
+                resolution = st.selectbox("📺 Resolution", ["720p", "1080p", "1440p"], index=1)
         
         # Advanced settings
-        with st.expander("🔧 Advanced Settings"):
-            custom_rtmp = st.text_input("Custom RTMP URL (optional)")
-            stream_title = st.text_input("Stream Title", value="Live Stream")
-            stream_description = st.text_area("Stream Description", value="Live streaming session")
+        with st.expander("⚙️ Advanced Settings"):
+            custom_rtmp = st.text_input("🌐 Custom RTMP URL (optional)")
+            enable_dvr = st.checkbox("📹 Enable DVR", value=True)
+            enable_content_encryption = st.checkbox("🔐 Enable Content Encryption")
+            
+            # Thumbnail upload
+            thumbnail_file = st.file_uploader("🖼️ Custom Thumbnail", type=['jpg', 'jpeg', 'png'])
+            
+            # Monetization settings
+            st.subheader("💰 Monetization")
+            enable_monetization = st.checkbox("💵 Enable Monetization")
+            if enable_monetization:
+                ad_breaks = st.checkbox("📺 Enable Ad Breaks")
+                super_chat = st.checkbox("💬 Enable Super Chat", value=True)
     
     with col2:
         st.header("📊 Status & Controls")
@@ -654,6 +887,11 @@ def main():
         streaming = st.session_state.get('streaming', False)
         if streaming:
             st.error("🔴 LIVE")
+            
+            # Live stats
+            if 'stream_start_time' in st.session_state:
+                duration = datetime.now() - st.session_state['stream_start_time']
+                st.metric("⏱️ Duration", str(duration).split('.')[0])
         else:
             st.success("⚫ OFFLINE")
         
@@ -667,97 +905,212 @@ def main():
             elif not stream_key:
                 st.error("❌ Stream key is required!")
             else:
+                # Save streaming session
+                save_streaming_session(
+                    st.session_state['session_id'],
+                    video_path,
+                    stream_title,
+                    stream_description,
+                    ", ".join(tags),
+                    category_id,
+                    privacy_status,
+                    made_for_kids,
+                    st.session_state.get('channel_info', {}).get('snippet', {}).get('title', 'Unknown')
+                )
+                
                 # Create YouTube live stream if requested
                 if auto_create and 'youtube_service' in st.session_state:
                     service = st.session_state['youtube_service']
                     if service:
                         scheduled_time = datetime.combine(date, time_val)
-                        live_info = create_live_stream(service, stream_title, stream_description, scheduled_time)
+                        live_info = create_live_stream(
+                            service, 
+                            stream_title, 
+                            stream_description, 
+                            scheduled_time,
+                            tags,
+                            category_id,
+                            privacy_status,
+                            made_for_kids
+                        )
                         if live_info:
                             st.success(f"✅ Live stream created!")
                             st.info(f"Watch URL: {live_info['watch_url']}")
                             st.session_state['current_stream_key'] = live_info['stream_key']
+                            st.session_state['live_broadcast_info'] = live_info
                             stream_key = live_info['stream_key']
+                            log_to_database(st.session_state['session_id'], "INFO", f"YouTube Live created: {live_info['watch_url']}")
                 elif auto_create and 'channel_config' in st.session_state and selected_channel and 'auth' in selected_channel:
                     service = create_youtube_service(selected_channel['auth'])
                     if service:
                         scheduled_time = datetime.combine(date, time_val)
-                        live_info = create_live_stream(service, stream_title, stream_description, scheduled_time)
+                        live_info = create_live_stream(
+                            service, 
+                            stream_title, 
+                            stream_description, 
+                            scheduled_time,
+                            tags,
+                            category_id,
+                            privacy_status,
+                            made_for_kids
+                        )
                         if live_info:
                             st.success(f"✅ Live stream created!")
                             st.info(f"Watch URL: {live_info['watch_url']}")
                             st.session_state['current_stream_key'] = live_info['stream_key']
+                            st.session_state['live_broadcast_info'] = live_info
                             stream_key = live_info['stream_key']
+                            log_to_database(st.session_state['session_id'], "INFO", f"YouTube Live created: {live_info['watch_url']}")
                 
                 # Start streaming
                 st.session_state['streaming'] = True
-                st.session_state['logs'] = []
+                st.session_state['stream_start_time'] = datetime.now()
+                st.session_state['live_logs'] = []
                 
                 def log_callback(msg):
-                    if 'logs' not in st.session_state:
-                        st.session_state['logs'] = []
-                    st.session_state['logs'].append(msg)
+                    if 'live_logs' not in st.session_state:
+                        st.session_state['live_logs'] = []
+                    st.session_state['live_logs'].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+                    # Keep only last 100 logs in memory
+                    if len(st.session_state['live_logs']) > 100:
+                        st.session_state['live_logs'] = st.session_state['live_logs'][-100:]
                 
                 st.session_state['ffmpeg_thread'] = threading.Thread(
                     target=run_ffmpeg, 
-                    args=(video_path, stream_key, is_shorts, log_callback, custom_rtmp or None), 
+                    args=(video_path, stream_key, is_shorts, log_callback, custom_rtmp or None, st.session_state['session_id']), 
                     daemon=True
                 )
                 st.session_state['ffmpeg_thread'].start()
                 st.success("🚀 Streaming started!")
+                log_to_database(st.session_state['session_id'], "INFO", f"Streaming started: {video_path}")
                 st.rerun()
         
         if st.button("⏹️ Stop Streaming", type="secondary"):
             st.session_state['streaming'] = False
+            if 'stream_start_time' in st.session_state:
+                del st.session_state['stream_start_time']
             os.system("pkill ffmpeg")
             if os.path.exists("temp_video.mp4"):
                 os.remove("temp_video.mp4")
             st.warning("⏸️ Streaming stopped!")
+            log_to_database(st.session_state['session_id'], "INFO", "Streaming stopped by user")
             st.rerun()
+        
+        # Live broadcast info
+        if 'live_broadcast_info' in st.session_state:
+            st.subheader("📺 Live Broadcast")
+            broadcast_info = st.session_state['live_broadcast_info']
+            st.write(f"**Watch URL:** [Open Stream]({broadcast_info['watch_url']})")
+            st.write(f"**Broadcast ID:** {broadcast_info['broadcast_id']}")
         
         # Statistics
         st.subheader("📈 Statistics")
-        if 'logs' in st.session_state:
-            st.metric("Log Entries", len(st.session_state['logs']))
+        
+        # Session stats
+        session_logs = get_logs_from_database(st.session_state['session_id'], 50)
+        st.metric("Session Logs", len(session_logs))
+        
+        if 'live_logs' in st.session_state:
+            st.metric("Live Log Entries", len(st.session_state['live_logs']))
         
         # Channel info display
         if 'channel_config' in st.session_state:
             config = st.session_state['channel_config']
             st.metric("Configured Channels", len(config['channels']))
+        
+        # Quick actions
+        st.subheader("⚡ Quick Actions")
+        
+        if st.button("📋 Copy Stream Key"):
+            if 'current_stream_key' in st.session_state:
+                st.code(st.session_state['current_stream_key'])
+                st.success("Stream key displayed above!")
+        
+        if st.button("🔄 Refresh Status"):
+            st.rerun()
     
-    # Ads section
+    # Live Logs Section
     st.markdown("---")
-    show_ads = st.checkbox("📢 Show Ads", value=True)
-    if show_ads:
-        st.subheader("🎯 Sponsored Content")
-        components.html(
-            """
-            <div style="background:#f0f2f6;padding:20px;border-radius:10px;text-align:center;margin:20px 0;">
-                <script type='text/javascript' 
-                        src='//pl26562103.profitableratecpm.com/28/f9/95/28f9954a1d5bbf4924abe123c76a68d2.js'>
-                </script>
-                <p style="color:#888;font-style:italic;">Advertisement space</p>
-            </div>
-            """,
-            height=300
-        )
+    st.header("📝 Live Streaming Logs")
     
-    # Logs section
-    st.markdown("---")
-    st.header("📝 Streaming Logs")
+    # Log tabs
+    tab1, tab2, tab3 = st.tabs(["🔴 Live Logs", "📊 Session History", "🗂️ All Logs"])
     
-    log_container = st.container()
-    with log_container:
-        if 'logs' in st.session_state and st.session_state['logs']:
-            logs_text = "\n".join(st.session_state['logs'][-50:])  # Show last 50 logs
-            st.text_area("Logs", logs_text, height=200, disabled=True)
+    with tab1:
+        st.subheader("Real-time Streaming Logs")
+        
+        # Live logs container
+        log_container = st.container()
+        with log_container:
+            if 'live_logs' in st.session_state and st.session_state['live_logs']:
+                # Show last 50 live logs
+                recent_logs = st.session_state['live_logs'][-50:]
+                logs_text = "\n".join(recent_logs)
+                st.text_area("Live Logs", logs_text, height=300, disabled=True, key="live_logs_display")
+            else:
+                st.info("No live logs available. Start streaming to see real-time logs.")
+        
+        # Auto-refresh toggle
+        auto_refresh = st.checkbox("🔄 Auto-refresh logs", value=streaming)
+        
+        if auto_refresh and streaming:
+            time.sleep(2)
+            st.rerun()
+    
+    with tab2:
+        st.subheader("Current Session History")
+        
+        session_logs = get_logs_from_database(st.session_state['session_id'], 100)
+        if session_logs:
+            # Create a formatted display
+            for log in session_logs[:20]:  # Show last 20 session logs
+                timestamp, log_type, message, video_file, channel_name = log
+                
+                # Color code by log type
+                if log_type == "ERROR":
+                    st.error(f"**{timestamp}** - {message}")
+                elif log_type == "INFO":
+                    st.info(f"**{timestamp}** - {message}")
+                elif log_type == "FFMPEG":
+                    st.text(f"{timestamp} - {message}")
+                else:
+                    st.write(f"**{timestamp}** - {message}")
         else:
-            st.info("No logs available. Start streaming to see logs.")
+            st.info("No session logs available yet.")
     
-    # Auto-refresh logs if streaming
-    if streaming:
-        time.sleep(2)
-        st.rerun()
+    with tab3:
+        st.subheader("All Historical Logs")
+        
+        # Filter options
+        col_filter1, col_filter2 = st.columns(2)
+        
+        with col_filter1:
+            log_limit = st.selectbox("Show logs", [50, 100, 200, 500], index=1)
+        
+        with col_filter2:
+            log_type_filter = st.selectbox("Filter by type", ["All", "INFO", "ERROR", "FFMPEG"])
+        
+        all_logs = get_logs_from_database(limit=log_limit)
+        
+        if all_logs:
+            # Filter by type if selected
+            if log_type_filter != "All":
+                all_logs = [log for log in all_logs if log[1] == log_type_filter]
+            
+            # Display in expandable sections
+            for i, log in enumerate(all_logs[:50]):  # Limit display to 50 for performance
+                timestamp, log_type, message, video_file, channel_name = log
+                
+                with st.expander(f"{log_type} - {timestamp} - {message[:50]}..."):
+                    st.write(f"**Timestamp:** {timestamp}")
+                    st.write(f"**Type:** {log_type}")
+                    st.write(f"**Message:** {message}")
+                    if video_file:
+                        st.write(f"**Video File:** {video_file}")
+                    if channel_name:
+                        st.write(f"**Channel:** {channel_name}")
+        else:
+            st.info("No historical logs available.")
 
 if __name__ == '__main__':
     main()
