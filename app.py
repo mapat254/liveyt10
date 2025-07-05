@@ -33,80 +33,130 @@ except ImportError:
 # Initialize database for persistent logs
 def init_database():
     """Initialize SQLite database for persistent logs"""
-    db_path = Path("streaming_logs.db")
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    # Create logs table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS streaming_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            log_type TEXT NOT NULL,
-            message TEXT NOT NULL,
-            video_file TEXT,
-            stream_key TEXT,
-            channel_name TEXT
-        )
-    ''')
-    
-    # Create streaming_sessions table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS streaming_sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT UNIQUE NOT NULL,
-            start_time TEXT NOT NULL,
-            end_time TEXT,
-            video_file TEXT,
-            stream_title TEXT,
-            stream_description TEXT,
-            tags TEXT,
-            category TEXT,
-            privacy_status TEXT,
-            made_for_kids BOOLEAN,
-            channel_name TEXT,
-            status TEXT DEFAULT 'active'
-        )
-    ''')
-    
-    # Create scheduled_streams table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS scheduled_streams (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            stream_title TEXT NOT NULL,
-            stream_description TEXT,
-            scheduled_time TEXT NOT NULL,
-            tags TEXT,
-            category TEXT,
-            privacy_status TEXT DEFAULT 'public',
-            made_for_kids BOOLEAN DEFAULT 0,
-            stream_type TEXT DEFAULT 'scheduled',
-            status TEXT DEFAULT 'pending',
-            video_file TEXT,
-            stream_key TEXT,
-            broadcast_id TEXT,
-            watch_url TEXT,
-            created_at TEXT NOT NULL,
-            channel_name TEXT
-        )
-    ''')
-    
-    # Create saved_channels table for persistent authentication
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS saved_channels (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel_name TEXT UNIQUE NOT NULL,
-            channel_id TEXT,
-            auth_data TEXT NOT NULL,
-            last_used TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
+    try:
+        db_path = Path("streaming_logs.db")
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Create logs table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS streaming_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                log_type TEXT NOT NULL,
+                message TEXT NOT NULL,
+                video_file TEXT,
+                stream_key TEXT,
+                channel_name TEXT
+            )
+        ''')
+        
+        # Create streaming_sessions table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS streaming_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT UNIQUE NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT,
+                video_file TEXT,
+                stream_title TEXT,
+                stream_description TEXT,
+                tags TEXT,
+                category TEXT,
+                privacy_status TEXT,
+                made_for_kids BOOLEAN,
+                channel_name TEXT,
+                status TEXT DEFAULT 'active'
+            )
+        ''')
+        
+        # Create saved_channels table for persistent authentication
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS saved_channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_name TEXT UNIQUE NOT NULL,
+                channel_id TEXT NOT NULL,
+                auth_data TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_used TEXT NOT NULL
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        st.error(f"Database initialization error: {e}")
+
+def save_channel_auth(channel_name, channel_id, auth_data):
+    """Save channel authentication data persistently"""
+    try:
+        conn = sqlite3.connect("streaming_logs.db")
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO saved_channels 
+            (channel_name, channel_id, auth_data, created_at, last_used)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (
+            channel_name,
+            channel_id,
+            json.dumps(auth_data),
+            datetime.now().isoformat(),
+            datetime.now().isoformat()
+        ))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        st.error(f"Error saving channel auth: {e}")
+        return False
+
+def load_saved_channels():
+    """Load saved channel authentication data"""
+    try:
+        conn = sqlite3.connect("streaming_logs.db")
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT channel_name, channel_id, auth_data, last_used
+            FROM saved_channels 
+            ORDER BY last_used DESC
+        ''')
+        
+        channels = []
+        for row in cursor.fetchall():
+            channel_name, channel_id, auth_data, last_used = row
+            channels.append({
+                'name': channel_name,
+                'id': channel_id,
+                'auth': json.loads(auth_data),
+                'last_used': last_used
+            })
+        
+        conn.close()
+        return channels
+    except Exception as e:
+        st.error(f"Error loading saved channels: {e}")
+        return []
+
+def update_channel_last_used(channel_name):
+    """Update last used timestamp for a channel"""
+    try:
+        conn = sqlite3.connect("streaming_logs.db")
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE saved_channels 
+            SET last_used = ?
+            WHERE channel_name = ?
+        ''', (datetime.now().isoformat(), channel_name))
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        st.error(f"Error updating channel last used: {e}")
 
 def log_to_database(session_id, log_type, message, video_file=None, stream_key=None, channel_name=None):
     """Log message to database"""
@@ -189,197 +239,6 @@ def save_streaming_session(session_id, video_file, stream_title, stream_descript
         conn.close()
     except Exception as e:
         st.error(f"Error saving streaming session: {e}")
-
-def save_scheduled_stream(session_id, stream_title, stream_description, scheduled_time, tags, category, privacy_status, made_for_kids, stream_type, video_file=None, channel_name=None):
-    """Save scheduled stream to database"""
-    try:
-        conn = sqlite3.connect("streaming_logs.db")
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO scheduled_streams 
-            (session_id, stream_title, stream_description, scheduled_time, tags, category, privacy_status, made_for_kids, stream_type, video_file, created_at, channel_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            session_id,
-            stream_title,
-            stream_description,
-            scheduled_time.isoformat(),
-            tags,
-            category,
-            privacy_status,
-            made_for_kids,
-            stream_type,
-            video_file,
-            datetime.now().isoformat(),
-            channel_name
-        ))
-        
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        st.error(f"Error saving scheduled stream: {e}")
-        return False
-
-def get_scheduled_streams(status=None):
-    """Get scheduled streams from database"""
-    try:
-        conn = sqlite3.connect("streaming_logs.db")
-        cursor = conn.cursor()
-        
-        if status:
-            cursor.execute('''
-                SELECT id, stream_title, stream_description, scheduled_time, tags, category, privacy_status, made_for_kids, stream_type, status, video_file, watch_url, channel_name
-                FROM scheduled_streams 
-                WHERE status = ?
-                ORDER BY scheduled_time ASC
-            ''', (status,))
-        else:
-            cursor.execute('''
-                SELECT id, stream_title, stream_description, scheduled_time, tags, category, privacy_status, made_for_kids, stream_type, status, video_file, watch_url, channel_name
-                FROM scheduled_streams 
-                ORDER BY scheduled_time ASC
-            ''')
-        
-        streams = cursor.fetchall()
-        conn.close()
-        return streams
-    except Exception as e:
-        st.error(f"Error getting scheduled streams: {e}")
-        return []
-
-def update_scheduled_stream_status(stream_id, status, broadcast_id=None, watch_url=None, stream_key=None):
-    """Update scheduled stream status"""
-    try:
-        conn = sqlite3.connect("streaming_logs.db")
-        cursor = conn.cursor()
-        
-        if broadcast_id and watch_url and stream_key:
-            cursor.execute('''
-                UPDATE scheduled_streams 
-                SET status = ?, broadcast_id = ?, watch_url = ?, stream_key = ?
-                WHERE id = ?
-            ''', (status, broadcast_id, watch_url, stream_key, stream_id))
-        else:
-            cursor.execute('''
-                UPDATE scheduled_streams 
-                SET status = ?
-                WHERE id = ?
-            ''', (status, stream_id))
-        
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        st.error(f"Error updating scheduled stream: {e}")
-        return False
-
-def delete_scheduled_stream(stream_id):
-    """Delete scheduled stream"""
-    try:
-        conn = sqlite3.connect("streaming_logs.db")
-        cursor = conn.cursor()
-        
-        cursor.execute('DELETE FROM scheduled_streams WHERE id = ?', (stream_id,))
-        
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        st.error(f"Error deleting scheduled stream: {e}")
-        return False
-
-def save_channel_auth(channel_name, channel_id, auth_data):
-    """Save channel authentication data"""
-    try:
-        conn = sqlite3.connect("streaming_logs.db")
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO saved_channels 
-            (channel_name, channel_id, auth_data, last_used, created_at)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (
-            channel_name,
-            channel_id,
-            json.dumps(auth_data),
-            datetime.now().isoformat(),
-            datetime.now().isoformat()
-        ))
-        
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        st.error(f"Error saving channel auth: {e}")
-        return False
-
-def get_saved_channels():
-    """Get saved channel authentication data"""
-    try:
-        conn = sqlite3.connect("streaming_logs.db")
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT channel_name, channel_id, auth_data, last_used
-            FROM saved_channels 
-            ORDER BY last_used DESC
-        ''')
-        
-        channels = cursor.fetchall()
-        conn.close()
-        
-        # Parse auth_data JSON
-        parsed_channels = []
-        for channel in channels:
-            try:
-                auth_data = json.loads(channel[2])
-                parsed_channels.append({
-                    'name': channel[0],
-                    'id': channel[1],
-                    'auth': auth_data,
-                    'last_used': channel[3]
-                })
-            except:
-                continue
-        
-        return parsed_channels
-    except Exception as e:
-        st.error(f"Error getting saved channels: {e}")
-        return []
-
-def update_channel_last_used(channel_name):
-    """Update channel last used timestamp"""
-    try:
-        conn = sqlite3.connect("streaming_logs.db")
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            UPDATE saved_channels 
-            SET last_used = ?
-            WHERE channel_name = ?
-        ''', (datetime.now().isoformat(), channel_name))
-        
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        st.error(f"Error updating channel last used: {e}")
-
-def delete_saved_channel(channel_name):
-    """Delete saved channel"""
-    try:
-        conn = sqlite3.connect("streaming_logs.db")
-        cursor = conn.cursor()
-        
-        cursor.execute('DELETE FROM saved_channels WHERE channel_name = ?', (channel_name,))
-        
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        st.error(f"Error deleting saved channel: {e}")
-        return False
 
 def load_google_oauth_config(json_file):
     """Load Google OAuth configuration from downloaded JSON file"""
@@ -537,11 +396,6 @@ def get_channel_info(service, channel_id=None):
 def create_live_stream(service, title, description, scheduled_start_time, tags=None, category_id="20", privacy_status="public", made_for_kids=False):
     """Create a live stream on YouTube with complete settings"""
     try:
-        # Ensure scheduled_start_time is in the future (at least 1 minute from now)
-        min_start_time = datetime.now() + timedelta(minutes=1)
-        if scheduled_start_time < min_start_time:
-            scheduled_start_time = min_start_time
-        
         # Create live stream
         stream_request = service.liveStreams().insert(
             part="snippet,cdn",
@@ -605,51 +459,65 @@ def create_live_stream(service, title, description, scheduled_start_time, tags=N
             "broadcast_id": broadcast_response['id'],
             "stream_id": stream_response['id'],
             "watch_url": f"https://www.youtube.com/watch?v={broadcast_response['id']}",
-            "studio_url": f"https://studio.youtube.com/channel/UC{broadcast_response['snippet']['channelId']}/livestreaming",
+            "studio_url": f"https://studio.youtube.com/video/{broadcast_response['id']}/livestreaming",
             "broadcast_response": broadcast_response
         }
     except Exception as e:
         st.error(f"Error creating live stream: {e}")
         return None
 
-def create_immediate_live_stream(service, title, description, tags=None, category_id="20", privacy_status="public", made_for_kids=False):
-    """Create an immediate live stream that starts now"""
+def get_existing_broadcasts(service, max_results=10):
+    """Get existing live broadcasts"""
     try:
-        # Set start time to now + 30 seconds to allow for setup
-        start_time = datetime.now() + timedelta(seconds=30)
-        
-        return create_live_stream(
-            service, title, description, start_time, tags, category_id, privacy_status, made_for_kids
-        )
-    except Exception as e:
-        st.error(f"Error creating immediate live stream: {e}")
-        return None
-
-def get_existing_live_streams(service):
-    """Get existing live streams from YouTube"""
-    try:
-        # Get live broadcasts
-        broadcasts_request = service.liveBroadcasts().list(
+        request = service.liveBroadcasts().list(
             part="snippet,status,contentDetails",
-            broadcastStatus="all",
-            maxResults=50
+            mine=True,
+            maxResults=max_results,
+            broadcastStatus="all"
         )
-        broadcasts_response = broadcasts_request.execute()
-        
-        # Get live streams
-        streams_request = service.liveStreams().list(
-            part="snippet,cdn,status",
-            maxResults=50
-        )
-        streams_response = streams_request.execute()
-        
-        return {
-            "broadcasts": broadcasts_response.get('items', []),
-            "streams": streams_response.get('items', [])
-        }
+        response = request.execute()
+        return response.get('items', [])
     except Exception as e:
-        st.error(f"Error getting existing live streams: {e}")
-        return {"broadcasts": [], "streams": []}
+        st.error(f"Error getting existing broadcasts: {e}")
+        return []
+
+def get_broadcast_stream_key(service, broadcast_id):
+    """Get stream key for existing broadcast"""
+    try:
+        # Get broadcast details
+        broadcast_request = service.liveBroadcasts().list(
+            part="contentDetails",
+            id=broadcast_id
+        )
+        broadcast_response = broadcast_request.execute()
+        
+        if not broadcast_response['items']:
+            return None
+            
+        stream_id = broadcast_response['items'][0]['contentDetails'].get('boundStreamId')
+        
+        if not stream_id:
+            return None
+            
+        # Get stream details
+        stream_request = service.liveStreams().list(
+            part="cdn",
+            id=stream_id
+        )
+        stream_response = stream_request.execute()
+        
+        if stream_response['items']:
+            stream_info = stream_response['items'][0]['cdn']['ingestionInfo']
+            return {
+                "stream_key": stream_info['streamName'],
+                "stream_url": stream_info['ingestionAddress'],
+                "stream_id": stream_id
+            }
+        
+        return None
+    except Exception as e:
+        st.error(f"Error getting broadcast stream key: {e}")
+        return None
 
 def run_ffmpeg(video_path, stream_key, is_shorts, log_callback, rtmp_url=None, session_id=None):
     """Run FFmpeg for streaming with enhanced logging"""
@@ -696,28 +564,6 @@ def run_ffmpeg(video_path, stream_key, is_shorts, log_callback, rtmp_url=None, s
         if session_id:
             log_to_database(session_id, "INFO", final_msg, video_path)
 
-def get_url_params():
-    """Get URL parameters using JavaScript"""
-    js_code = """
-    <script>
-        const urlParams = new URLSearchParams(window.location.search);
-        const code = urlParams.get('code');
-        const scope = urlParams.get('scope');
-        
-        if (code) {
-            // Send code to Streamlit
-            window.parent.postMessage({
-                type: 'streamlit:setComponentValue',
-                value: {
-                    code: code,
-                    scope: scope
-                }
-            }, '*');
-        }
-    </script>
-    """
-    return components.html(js_code, height=0)
-
 def auto_process_auth_code():
     """Automatically process authorization code from URL"""
     # Check URL parameters
@@ -760,31 +606,13 @@ def auto_process_auth_code():
                                 st.session_state['youtube_service'] = service
                                 st.session_state['channel_info'] = channel
                                 
-                                # Save channel authentication
+                                # Save channel authentication persistently
                                 save_channel_auth(
                                     channel['snippet']['title'],
                                     channel['id'],
                                     creds_dict
                                 )
                                 
-                                # Create JSON config
-                                json_config = {
-                                    "channels": [
-                                        {
-                                            "name": channel['snippet']['title'],
-                                            "stream_key": "will-be-generated",
-                                            "description": channel['snippet'].get('description', ''),
-                                            "auth": creds_dict
-                                        }
-                                    ],
-                                    "default_settings": {
-                                        "quality": "1080p",
-                                        "privacy": "public",
-                                        "auto_start": False
-                                    }
-                                }
-                                
-                                st.session_state['auto_generated_config'] = json_config
                                 st.success(f"✅ Successfully connected to: {channel['snippet']['title']}")
                                 
                                 # Clear URL parameters
@@ -840,30 +668,45 @@ def main():
     # Auto-process authorization code if present
     auto_process_auth_code()
     
-    # Load saved channels on startup
-    if 'saved_channels_loaded' not in st.session_state:
-        saved_channels = get_saved_channels()
-        if saved_channels:
-            st.session_state['saved_channels'] = saved_channels
-            # Auto-load the most recently used channel
-            if saved_channels:
-                recent_channel = saved_channels[0]
-                service = create_youtube_service(recent_channel['auth'])
-                if service:
-                    channels = get_channel_info(service)
-                    if channels:
-                        channel = channels[0]
-                        st.session_state['youtube_service'] = service
-                        st.session_state['channel_info'] = channel
-                        st.session_state['current_channel_name'] = recent_channel['name']
-        st.session_state['saved_channels_loaded'] = True
-    
     # Sidebar for configuration
     with st.sidebar:
         st.header("📋 Configuration")
         
         # Session info
         st.info(f"🆔 Session: {st.session_state['session_id']}")
+        
+        # Saved Channels Section
+        st.subheader("💾 Saved Channels")
+        saved_channels = load_saved_channels()
+        
+        if saved_channels:
+            st.write("**Previously authenticated channels:**")
+            for channel in saved_channels:
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write(f"📺 {channel['name']}")
+                    st.caption(f"Last used: {channel['last_used'][:10]}")
+                
+                with col2:
+                    if st.button("🔑 Use", key=f"use_{channel['name']}"):
+                        # Load this channel's authentication
+                        service = create_youtube_service(channel['auth'])
+                        if service:
+                            # Verify the authentication is still valid
+                            channels = get_channel_info(service)
+                            if channels:
+                                channel_info = channels[0]
+                                st.session_state['youtube_service'] = service
+                                st.session_state['channel_info'] = channel_info
+                                update_channel_last_used(channel['name'])
+                                st.success(f"✅ Loaded: {channel['name']}")
+                                st.rerun()
+                            else:
+                                st.error("❌ Authentication expired")
+                        else:
+                            st.error("❌ Failed to load authentication")
+        else:
+            st.info("No saved channels. Authenticate below to save.")
         
         # Google OAuth Configuration
         st.subheader("🔐 Google OAuth Setup")
@@ -918,95 +761,18 @@ def main():
                                             st.success(f"🎉 Connected to: {channel['snippet']['title']}")
                                             st.session_state['youtube_service'] = service
                                             st.session_state['channel_info'] = channel
-                                            st.session_state['current_channel_name'] = channel['snippet']['title']
                                             
-                                            # Save channel authentication
+                                            # Save channel authentication persistently
                                             save_channel_auth(
                                                 channel['snippet']['title'],
                                                 channel['id'],
                                                 creds_dict
                                             )
-                                            
-                                            # Create JSON config
-                                            json_config = {
-                                                "channels": [
-                                                    {
-                                                        "name": channel['snippet']['title'],
-                                                        "stream_key": "will-be-generated",
-                                                        "description": channel['snippet'].get('description', ''),
-                                                        "auth": creds_dict
-                                                    }
-                                                ],
-                                                "default_settings": {
-                                                    "quality": "1080p",
-                                                    "privacy": "public",
-                                                    "auto_start": False
-                                                }
-                                            }
-                                            
-                                            st.session_state['auto_generated_config'] = json_config
                         else:
                             st.error("Please enter the authorization code")
         
-        # Saved Channels Section
-        st.markdown("---")
-        st.subheader("💾 Saved Channels")
-        
-        saved_channels = get_saved_channels()
-        if saved_channels:
-            for channel in saved_channels:
-                col1, col2, col3 = st.columns([3, 1, 1])
-                
-                with col1:
-                    if st.button(f"📺 {channel['name']}", key=f"use_{channel['name']}"):
-                        # Load this channel
-                        service = create_youtube_service(channel['auth'])
-                        if service:
-                            channels = get_channel_info(service)
-                            if channels:
-                                channel_info = channels[0]
-                                st.session_state['youtube_service'] = service
-                                st.session_state['channel_info'] = channel_info
-                                st.session_state['current_channel_name'] = channel['name']
-                                update_channel_last_used(channel['name'])
-                                st.success(f"✅ Using: {channel['name']}")
-                                st.rerun()
-                            else:
-                                st.error("❌ Failed to load channel")
-                        else:
-                            st.error("❌ Authentication expired")
-                
-                with col2:
-                    last_used = datetime.fromisoformat(channel['last_used'])
-                    days_ago = (datetime.now() - last_used).days
-                    if days_ago == 0:
-                        st.caption("Today")
-                    else:
-                        st.caption(f"{days_ago}d ago")
-                
-                with col3:
-                    if st.button("🗑️", key=f"delete_{channel['name']}", help="Delete channel"):
-                        if delete_saved_channel(channel['name']):
-                            st.success("Channel deleted!")
-                            st.rerun()
-        else:
-            st.info("No saved channels yet")
-        
-        # Show auto-generated config download
-        if 'auto_generated_config' in st.session_state:
-            st.markdown("---")
-            st.subheader("📥 Download Generated Config")
-            config_json = json.dumps(st.session_state['auto_generated_config'], indent=2)
-            st.download_button(
-                label="📄 Download JSON Config",
-                data=config_json,
-                file_name="youtube_config.json",
-                mime="application/json"
-            )
-            st.info("💡 Save this file for future use!")
-        
         # JSON Configuration Upload
-        st.subheader("Channel Configuration")
+        st.subheader("📄 Channel Configuration")
         json_file = st.file_uploader("Upload JSON Configuration", type=['json'])
         
         if json_file:
@@ -1018,49 +784,6 @@ def main():
                     st.session_state['channel_config'] = config
                 else:
                     st.error(f"❌ Invalid configuration: {message}")
-        
-        # Scheduled Streams Panel
-        st.markdown("---")
-        st.subheader("📅 Scheduled Streams")
-        
-        upcoming_streams = get_scheduled_streams("pending")
-        if upcoming_streams:
-            for stream in upcoming_streams[:3]:  # Show only first 3
-                stream_id, title, description, scheduled_time_str, tags, category, privacy, made_for_kids, stream_type, status, video_file, watch_url, channel_name = stream
-                
-                scheduled_time = datetime.fromisoformat(scheduled_time_str)
-                now = datetime.now()
-                
-                if scheduled_time > now:
-                    time_diff = scheduled_time - now
-                    hours, remainder = divmod(time_diff.seconds, 3600)
-                    minutes, _ = divmod(remainder, 60)
-                    
-                    with st.container():
-                        st.write(f"**{title}**")
-                        if time_diff.days > 0:
-                            st.caption(f"⏰ {time_diff.days}d {hours}h {minutes}m")
-                        else:
-                            st.caption(f"⏰ {hours}h {minutes}m")
-                        
-                        col_action1, col_action2 = st.columns(2)
-                        with col_action1:
-                            if st.button("▶️ Start", key=f"start_{stream_id}"):
-                                st.session_state['start_scheduled_stream'] = stream_id
-                                st.rerun()
-                        
-                        with col_action2:
-                            if st.button("❌ Cancel", key=f"cancel_{stream_id}"):
-                                if update_scheduled_stream_status(stream_id, "cancelled"):
-                                    st.success("Stream cancelled!")
-                                    st.rerun()
-                        
-                        st.markdown("---")
-                else:
-                    # Stream time has passed, mark as expired
-                    update_scheduled_stream_status(stream_id, "expired")
-        else:
-            st.info("No upcoming streams")
         
         # Log Management
         st.markdown("---")
@@ -1132,50 +855,178 @@ def main():
                 st.write(f"**Views:** {channel['statistics'].get('viewCount', '0')}")
                 st.write(f"**Videos:** {channel['statistics'].get('videoCount', '0')}")
             
-            # Show authentication status
-            if 'current_channel_name' in st.session_state:
-                st.success(f"🔐 Using saved authentication")
+            # YouTube Live Stream Management
+            st.subheader("🎬 YouTube Live Stream Management")
+            
+            # Instructions panel
+            with st.expander("💡 How to Use YouTube Live Features"):
+                st.markdown("""
+                **🔑 Get Stream Key Only:**
+                - Creates a stream key without YouTube Live broadcast
+                - Use with external streaming software (OBS, etc.)
+                - Stream won't appear in YouTube Studio dashboard
                 
-                col_auth1, col_auth2 = st.columns(2)
-                with col_auth1:
-                    if st.button("🔑 Get Stream Key"):
-                        try:
-                            service = st.session_state['youtube_service']
-                            with st.spinner("Getting stream key..."):
-                                stream_info = get_stream_key_only(service)
-                                if stream_info:
-                                    stream_key = stream_info['stream_key']
-                                    st.session_state['current_stream_key'] = stream_key
-                                    st.session_state['current_stream_info'] = stream_info
-                                    st.success("✅ Stream key obtained!")
-                                    log_to_database(st.session_state['session_id'], "INFO", "Stream key generated successfully")
-                                    
-                                    # Display stream information
-                                    col_sk1, col_sk2 = st.columns(2)
-                                    with col_sk1:
-                                        st.text_input("Stream Key", value=stream_key, type="password")
-                                    with col_sk2:
-                                        st.text_input("RTMP URL", value=stream_info['stream_url'])
-                                    
-                                    st.info("💡 Use these credentials in your streaming software (OBS, etc.)")
-                        except Exception as e:
-                            error_msg = f"Error getting stream key: {e}"
-                            st.error(error_msg)
-                            log_to_database(st.session_state['session_id'], "ERROR", error_msg)
+                **🎬 Create YouTube Live:** ⭐ **RECOMMENDED**
+                - Creates complete YouTube Live broadcast
+                - Appears in YouTube Studio dashboard
+                - Uses all settings from form below
+                - Ready for audience immediately
                 
-                with col_auth2:
-                    if st.button("🚪 Logout"):
-                        # Clear current session
-                        if 'youtube_service' in st.session_state:
-                            del st.session_state['youtube_service']
-                        if 'channel_info' in st.session_state:
-                            del st.session_state['channel_info']
-                        if 'current_channel_name' in st.session_state:
-                            del st.session_state['current_channel_name']
-                        if 'current_stream_key' in st.session_state:
-                            del st.session_state['current_stream_key']
-                        st.success("✅ Logged out successfully!")
-                        st.rerun()
+                **📋 View Existing Streams:**
+                - Shows all your existing live broadcasts
+                - Can reuse existing streams
+                - Quick access to Watch and Studio URLs
+                
+                **⚠️ Important Notes:**
+                - Fill out stream settings below before creating
+                - YouTube Live broadcasts are scheduled to start in 30 seconds
+                - Use "Create YouTube Live" for best experience
+                """)
+            
+            # Three main buttons
+            col_btn1, col_btn2, col_btn3 = st.columns(3)
+            
+            with col_btn1:
+                if st.button("🔑 Get Stream Key Only", help="Get stream key without creating YouTube Live broadcast"):
+                    try:
+                        service = st.session_state['youtube_service']
+                        with st.spinner("Getting stream key..."):
+                            stream_info = get_stream_key_only(service)
+                            if stream_info:
+                                stream_key = stream_info['stream_key']
+                                st.session_state['current_stream_key'] = stream_key
+                                st.session_state['current_stream_info'] = stream_info
+                                st.success("✅ Stream key obtained!")
+                                log_to_database(st.session_state['session_id'], "INFO", "Stream key generated successfully")
+                                
+                                # Display stream information
+                                st.info("🔑 **Stream Key Generated** (for external streaming software)")
+                                col_sk1, col_sk2 = st.columns(2)
+                                with col_sk1:
+                                    st.text_input("Stream Key", value=stream_key, type="password", key="stream_key_display")
+                                with col_sk2:
+                                    st.text_input("RTMP URL", value=stream_info['stream_url'], key="rtmp_url_display")
+                    except Exception as e:
+                        error_msg = f"Error getting stream key: {e}"
+                        st.error(error_msg)
+                        log_to_database(st.session_state['session_id'], "ERROR", error_msg)
+            
+            with col_btn2:
+                if st.button("🎬 Create YouTube Live", type="primary", help="Create complete YouTube Live broadcast (appears in Studio)"):
+                    # Get form values
+                    stream_title = st.session_state.get('stream_title_input', 'Live Stream')
+                    stream_description = st.session_state.get('stream_description_input', 'Live streaming session')
+                    tags_input = st.session_state.get('tags_input', '')
+                    tags = [tag.strip() for tag in tags_input.split(",") if tag.strip()] if tags_input else []
+                    category_id = st.session_state.get('category_id', "20")
+                    privacy_status = st.session_state.get('privacy_status', "public")
+                    made_for_kids = st.session_state.get('made_for_kids', False)
+                    
+                    try:
+                        service = st.session_state['youtube_service']
+                        with st.spinner("Creating YouTube Live broadcast..."):
+                            # Schedule for 30 seconds from now
+                            scheduled_time = datetime.now() + timedelta(seconds=30)
+                            
+                            live_info = create_live_stream(
+                                service, 
+                                stream_title, 
+                                stream_description, 
+                                scheduled_time,
+                                tags,
+                                category_id,
+                                privacy_status,
+                                made_for_kids
+                            )
+                            
+                            if live_info:
+                                st.success("🎉 **YouTube Live Broadcast Created Successfully!**")
+                                st.session_state['current_stream_key'] = live_info['stream_key']
+                                st.session_state['live_broadcast_info'] = live_info
+                                
+                                # Display comprehensive information
+                                st.info("📺 **Live Broadcast Information:**")
+                                
+                                col_info1, col_info2 = st.columns(2)
+                                with col_info1:
+                                    st.write(f"**🎬 Title:** {stream_title}")
+                                    st.write(f"**🔒 Privacy:** {privacy_status.title()}")
+                                    st.write(f"**📂 Category:** {get_youtube_categories().get(category_id, 'Unknown')}")
+                                
+                                with col_info2:
+                                    st.write(f"**🏷️ Tags:** {', '.join(tags) if tags else 'None'}")
+                                    st.write(f"**👶 Made for Kids:** {'Yes' if made_for_kids else 'No'}")
+                                    st.write(f"**⏰ Scheduled:** {scheduled_time.strftime('%H:%M:%S')}")
+                                
+                                # Important links
+                                st.markdown("### 🔗 Important Links:")
+                                col_link1, col_link2 = st.columns(2)
+                                
+                                with col_link1:
+                                    st.markdown(f"**📺 Watch URL:** [Open Stream]({live_info['watch_url']})")
+                                    st.markdown(f"**🎛️ Studio URL:** [Manage in Studio]({live_info['studio_url']})")
+                                
+                                with col_link2:
+                                    st.text_input("🔑 Stream Key", value=live_info['stream_key'], type="password", key="created_stream_key")
+                                    st.text_input("🌐 RTMP URL", value=live_info['stream_url'], key="created_rtmp_url")
+                                
+                                st.success("✅ **Ready to stream!** Use the stream key above or click 'Start Streaming' below.")
+                                
+                                log_to_database(st.session_state['session_id'], "INFO", f"YouTube Live created: {live_info['watch_url']}")
+                    except Exception as e:
+                        error_msg = f"Error creating YouTube Live: {e}"
+                        st.error(error_msg)
+                        log_to_database(st.session_state['session_id'], "ERROR", error_msg)
+            
+            with col_btn3:
+                if st.button("📋 View Existing Streams", help="View and manage existing live broadcasts"):
+                    try:
+                        service = st.session_state['youtube_service']
+                        with st.spinner("Loading existing broadcasts..."):
+                            broadcasts = get_existing_broadcasts(service)
+                            
+                            if broadcasts:
+                                st.success(f"📺 Found {len(broadcasts)} existing broadcasts:")
+                                
+                                for i, broadcast in enumerate(broadcasts):
+                                    with st.expander(f"🎬 {broadcast['snippet']['title']} - {broadcast['status']['lifeCycleStatus']}"):
+                                        col_bc1, col_bc2 = st.columns(2)
+                                        
+                                        with col_bc1:
+                                            st.write(f"**Title:** {broadcast['snippet']['title']}")
+                                            st.write(f"**Status:** {broadcast['status']['lifeCycleStatus']}")
+                                            st.write(f"**Privacy:** {broadcast['status']['privacyStatus']}")
+                                            st.write(f"**Created:** {broadcast['snippet']['publishedAt'][:10]}")
+                                        
+                                        with col_bc2:
+                                            watch_url = f"https://www.youtube.com/watch?v={broadcast['id']}"
+                                            studio_url = f"https://studio.youtube.com/video/{broadcast['id']}/livestreaming"
+                                            
+                                            st.markdown(f"**Watch:** [Open]({watch_url})")
+                                            st.markdown(f"**Studio:** [Manage]({studio_url})")
+                                            
+                                            if st.button(f"🔑 Use This Stream", key=f"use_broadcast_{i}"):
+                                                # Get stream key for this broadcast
+                                                stream_info = get_broadcast_stream_key(service, broadcast['id'])
+                                                if stream_info:
+                                                    st.session_state['current_stream_key'] = stream_info['stream_key']
+                                                    st.session_state['live_broadcast_info'] = {
+                                                        'broadcast_id': broadcast['id'],
+                                                        'watch_url': watch_url,
+                                                        'studio_url': studio_url,
+                                                        'stream_key': stream_info['stream_key'],
+                                                        'stream_url': stream_info['stream_url']
+                                                    }
+                                                    st.success(f"✅ Using stream: {broadcast['snippet']['title']}")
+                                                    st.rerun()
+                                                else:
+                                                    st.error("❌ Could not get stream key for this broadcast")
+                            else:
+                                st.info("📺 No existing broadcasts found. Create a new one above!")
+                    except Exception as e:
+                        error_msg = f"Error loading existing broadcasts: {e}"
+                        st.error(error_msg)
+                        log_to_database(st.session_state['session_id'], "ERROR", error_msg)
         
         # Channel selection from JSON config
         elif 'channel_config' in st.session_state:
@@ -1229,70 +1080,36 @@ def main():
         # Enhanced Live Stream Settings
         st.subheader("📝 Live Stream Settings")
         
-        # Stream Schedule Type
-        st.markdown("### 📅 Stream Schedule")
-        stream_schedule_type = st.radio(
-            "Choose streaming option:",
-            ["🔴 Streaming Sekarang", "📅 Jadwalkan Streaming", "💾 Simpan sebagai Draft"],
-            horizontal=True
-        )
-        
         # Basic settings
         col_basic1, col_basic2 = st.columns(2)
         
         with col_basic1:
-            stream_title = st.text_input("🎬 Stream Title", value="Live Stream", max_chars=100, key="stream_title")
+            stream_title = st.text_input("🎬 Stream Title", value="Live Stream", max_chars=100, key="stream_title_input")
             privacy_status = st.selectbox("🔒 Privacy", ["public", "unlisted", "private"], key="privacy_status")
             made_for_kids = st.checkbox("👶 Made for Kids", key="made_for_kids")
         
         with col_basic2:
             categories = get_youtube_categories()
             category_names = list(categories.values())
-            selected_category_name = st.selectbox("📂 Category", category_names, index=category_names.index("Gaming"), key="category")
+            selected_category_name = st.selectbox("📂 Category", category_names, index=category_names.index("Gaming"))
             category_id = [k for k, v in categories.items() if v == selected_category_name][0]
+            st.session_state['category_id'] = category_id
             
-            # Date and time inputs based on schedule type
-            if stream_schedule_type == "📅 Jadwalkan Streaming":
-                date = st.date_input("📅 Streaming Date", min_value=datetime.now().date())
-                time_val = st.time_input("⏰ Streaming Time", value=datetime.now().time())
-                
-                # Validate scheduled time
-                scheduled_datetime = datetime.combine(date, time_val)
-                if scheduled_datetime <= datetime.now():
-                    st.warning("⚠️ Scheduled time must be in the future!")
-                else:
-                    time_diff = scheduled_datetime - datetime.now()
-                    hours, remainder = divmod(time_diff.seconds, 3600)
-                    minutes, _ = divmod(remainder, 60)
-                    if time_diff.days > 0:
-                        st.info(f"⏰ Stream will start in {time_diff.days} days, {hours} hours, {minutes} minutes")
-                    else:
-                        st.info(f"⏰ Stream will start in {hours} hours, {minutes} minutes")
-            else:
-                # For immediate streaming or draft, use current time
-                date = datetime.now().date()
-                time_val = datetime.now().time()
+            # Stream schedule type
+            stream_schedule_type = st.selectbox("⏰ Schedule", ["📍 Simpan sebagai Draft", "🔴 Publish Sekarang"])
         
         # Description
         stream_description = st.text_area("📄 Stream Description", 
                                         value="Live streaming session", 
                                         max_chars=5000,
                                         height=100,
-                                        key="stream_description")
+                                        key="stream_description_input")
         
         # Tags
         tags_input = st.text_input("🏷️ Tags (comma separated)", 
                                  placeholder="gaming, live, stream, youtube",
                                  key="tags_input")
         tags = [tag.strip() for tag in tags_input.split(",") if tag.strip()] if tags_input else []
-        
-        # Store current form values in session state for YouTube Live creation
-        st.session_state['temp_stream_title'] = stream_title
-        st.session_state['temp_stream_description'] = stream_description
-        st.session_state['temp_tags'] = tags
-        st.session_state['temp_category_id'] = category_id
-        st.session_state['temp_privacy_status'] = privacy_status
-        st.session_state['temp_made_for_kids'] = made_for_kids
         
         if tags:
             st.write("**Tags:**", ", ".join(tags))
@@ -1303,7 +1120,6 @@ def main():
             
             with col_tech1:
                 is_shorts = st.checkbox("📱 Shorts Mode (720x1280)")
-                auto_create = st.checkbox("🤖 Auto-create YouTube Live")
                 enable_chat = st.checkbox("💬 Enable Live Chat", value=True)
             
             with col_tech2:
@@ -1342,231 +1158,51 @@ def main():
         else:
             st.success("⚫ OFFLINE")
         
-        # Handle scheduled stream start
-        if 'start_scheduled_stream' in st.session_state:
-            stream_id = st.session_state['start_scheduled_stream']
-            del st.session_state['start_scheduled_stream']
-            
-            # Get stream details
-            scheduled_streams = get_scheduled_streams()
-            stream_to_start = next((s for s in scheduled_streams if s[0] == stream_id), None)
-            
-            if stream_to_start:
-                # Load stream settings
-                stream_id, title, description, scheduled_time_str, tags_str, category, privacy, made_for_kids, stream_type, status, video_file, watch_url, channel_name = stream_to_start
-                
-                # Update session state with stream settings
-                st.session_state['scheduled_stream_title'] = title
-                st.session_state['scheduled_stream_description'] = description
-                st.session_state['scheduled_stream_tags'] = tags_str.split(", ") if tags_str else []
-                st.session_state['scheduled_stream_category'] = category
-                st.session_state['scheduled_stream_privacy'] = privacy
-                st.session_state['scheduled_stream_made_for_kids'] = made_for_kids
-                st.session_state['scheduled_stream_video'] = video_file
-                
-                st.info(f"🚀 Starting scheduled stream: {title}")
-        
-        # Dynamic button text based on schedule type
-        if stream_schedule_type == "🔴 Streaming Sekarang":
-            button_text = "🔴 Mulai Streaming Sekarang"
-            button_type = "primary"
-        elif stream_schedule_type == "📅 Jadwalkan Streaming":
-            button_text = "📅 Jadwalkan Stream"
-            button_type = "secondary"
-        else:  # Draft
-            button_text = "💾 Simpan sebagai Draft"
-            button_type = "secondary"
-        
-        # Main action button
-        if st.button(button_text, type=button_type):
+        # Control buttons
+        if st.button("▶️ Start Streaming", type="primary"):
             # Get the current stream key
             stream_key = st.session_state.get('current_stream_key', '')
             
-            # Use scheduled stream settings if available
-            if 'scheduled_stream_title' in st.session_state:
-                final_title = st.session_state['scheduled_stream_title']
-                final_description = st.session_state['scheduled_stream_description']
-                final_tags = st.session_state['scheduled_stream_tags']
-                final_category = st.session_state['scheduled_stream_category']
-                final_privacy = st.session_state['scheduled_stream_privacy']
-                final_made_for_kids = st.session_state['scheduled_stream_made_for_kids']
-                final_video_path = st.session_state.get('scheduled_stream_video', video_path)
-                
-                # Clear scheduled stream settings
-                for key in ['scheduled_stream_title', 'scheduled_stream_description', 'scheduled_stream_tags', 
-                           'scheduled_stream_category', 'scheduled_stream_privacy', 'scheduled_stream_made_for_kids', 'scheduled_stream_video']:
-                    if key in st.session_state:
-                        del st.session_state[key]
+            if not video_path:
+                st.error("❌ Please select or upload a video!")
+            elif not stream_key:
+                st.error("❌ Stream key is required!")
             else:
-                final_title = stream_title
-                final_description = stream_description
-                final_tags = tags
-                final_category = category_id
-                final_privacy = privacy_status
-                final_made_for_kids = made_for_kids
-                final_video_path = video_path
-            
-            if stream_schedule_type == "🔴 Streaming Sekarang":
-                # Immediate streaming
-                if not final_video_path:
-                    st.error("❌ Please select or upload a video!")
-                elif not stream_key:
-                    st.error("❌ Stream key is required!")
-                else:
-                    # Save streaming session
-                    save_streaming_session(
-                        st.session_state['session_id'],
-                        final_video_path,
-                        final_title,
-                        final_description,
-                        ", ".join(final_tags),
-                        final_category,
-                        final_privacy,
-                        final_made_for_kids,
-                        st.session_state.get('channel_info', {}).get('snippet', {}).get('title', 'Unknown')
-                    )
-                    
-                    # Create YouTube live stream if requested
-                    if auto_create and 'youtube_service' in st.session_state:
-                        service = st.session_state['youtube_service']
-                        if service:
-                            scheduled_time = datetime.now()
-                            live_info = create_live_stream(
-                                service, 
-                                final_title, 
-                                final_description, 
-                                scheduled_time,
-                                final_tags,
-                                final_category,
-                                final_privacy,
-                                final_made_for_kids
-                            )
-                            if live_info:
-                                st.success(f"✅ Live stream created!")
-                                st.info(f"Watch URL: {live_info['watch_url']}")
-                                st.session_state['current_stream_key'] = live_info['stream_key']
-                                st.session_state['live_broadcast_info'] = live_info
-                                stream_key = live_info['stream_key']
-                                log_to_database(st.session_state['session_id'], "INFO", f"YouTube Live created: {live_info['watch_url']}")
-                    
-                    # Start streaming
-                    st.session_state['streaming'] = True
-                    st.session_state['stream_start_time'] = datetime.now()
-                    st.session_state['live_logs'] = []
-                    
-                    def log_callback(msg):
-                        if 'live_logs' not in st.session_state:
-                            st.session_state['live_logs'] = []
-                        st.session_state['live_logs'].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-                        # Keep only last 100 logs in memory
-                        if len(st.session_state['live_logs']) > 100:
-                            st.session_state['live_logs'] = st.session_state['live_logs'][-100:]
-                    
-                    st.session_state['ffmpeg_thread'] = threading.Thread(
-                        target=run_ffmpeg, 
-                        args=(final_video_path, stream_key, is_shorts, log_callback, custom_rtmp or None, st.session_state['session_id']), 
-                        daemon=True
-                    )
-                    st.session_state['ffmpeg_thread'].start()
-                    st.success("🚀 Streaming started!")
-                    log_to_database(st.session_state['session_id'], "INFO", f"Streaming started: {final_video_path}")
-                    st.rerun()
-            
-            elif stream_schedule_type == "📅 Jadwalkan Streaming":
-                # Schedule streaming
-                scheduled_datetime = datetime.combine(date, time_val)
-                
-                if scheduled_datetime <= datetime.now():
-                    st.error("❌ Scheduled time must be in the future!")
-                else:
-                    # Create YouTube live stream if requested
-                    if auto_create and 'youtube_service' in st.session_state:
-                        service = st.session_state['youtube_service']
-                        if service:
-                            live_info = create_live_stream(
-                                service, 
-                                final_title, 
-                                final_description, 
-                                scheduled_datetime,
-                                final_tags,
-                                final_category,
-                                final_privacy,
-                                final_made_for_kids
-                            )
-                            if live_info:
-                                # Save scheduled stream with YouTube info
-                                if save_scheduled_stream(
-                                    st.session_state['session_id'],
-                                    final_title,
-                                    final_description,
-                                    scheduled_datetime,
-                                    ", ".join(final_tags),
-                                    final_category,
-                                    final_privacy,
-                                    final_made_for_kids,
-                                    "scheduled",
-                                    final_video_path,
-                                    st.session_state.get('channel_info', {}).get('snippet', {}).get('title', 'Unknown')
-                                ):
-                                    # Update with YouTube info
-                                    conn = sqlite3.connect("streaming_logs.db")
-                                    cursor = conn.cursor()
-                                    cursor.execute('''
-                                        UPDATE scheduled_streams 
-                                        SET broadcast_id = ?, watch_url = ?, stream_key = ?
-                                        WHERE session_id = ? AND stream_title = ? AND scheduled_time = ?
-                                    ''', (
-                                        live_info['broadcast_id'],
-                                        live_info['watch_url'],
-                                        live_info['stream_key'],
-                                        st.session_state['session_id'],
-                                        final_title,
-                                        scheduled_datetime.isoformat()
-                                    ))
-                                    conn.commit()
-                                    conn.close()
-                                    
-                                    st.success(f"✅ Stream scheduled for {scheduled_datetime.strftime('%Y-%m-%d %H:%M')}!")
-                                    st.info(f"Watch URL: {live_info['watch_url']}")
-                                    log_to_database(st.session_state['session_id'], "INFO", f"Stream scheduled: {final_title} at {scheduled_datetime}")
-                                    st.rerun()
-                    else:
-                        # Save scheduled stream without YouTube creation
-                        if save_scheduled_stream(
-                            st.session_state['session_id'],
-                            final_title,
-                            final_description,
-                            scheduled_datetime,
-                            ", ".join(final_tags),
-                            final_category,
-                            final_privacy,
-                            final_made_for_kids,
-                            "scheduled",
-                            final_video_path,
-                            st.session_state.get('channel_info', {}).get('snippet', {}).get('title', 'Unknown')
-                        ):
-                            st.success(f"✅ Stream scheduled for {scheduled_datetime.strftime('%Y-%m-%d %H:%M')}!")
-                            log_to_database(st.session_state['session_id'], "INFO", f"Stream scheduled: {final_title} at {scheduled_datetime}")
-                            st.rerun()
-            
-            else:  # Draft
-                # Save as draft
-                if save_scheduled_stream(
+                # Save streaming session
+                save_streaming_session(
                     st.session_state['session_id'],
-                    final_title,
-                    final_description,
-                    datetime.now(),  # Use current time as placeholder
-                    ", ".join(final_tags),
-                    final_category,
-                    final_privacy,
-                    final_made_for_kids,
-                    "draft",
-                    final_video_path,
+                    video_path,
+                    stream_title,
+                    stream_description,
+                    ", ".join(tags),
+                    category_id,
+                    privacy_status,
+                    made_for_kids,
                     st.session_state.get('channel_info', {}).get('snippet', {}).get('title', 'Unknown')
-                ):
-                    st.success("✅ Stream saved as draft!")
-                    log_to_database(st.session_state['session_id'], "INFO", f"Stream draft saved: {final_title}")
-                    st.rerun()
+                )
+                
+                # Start streaming
+                st.session_state['streaming'] = True
+                st.session_state['stream_start_time'] = datetime.now()
+                st.session_state['live_logs'] = []
+                
+                def log_callback(msg):
+                    if 'live_logs' not in st.session_state:
+                        st.session_state['live_logs'] = []
+                    st.session_state['live_logs'].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+                    # Keep only last 100 logs in memory
+                    if len(st.session_state['live_logs']) > 100:
+                        st.session_state['live_logs'] = st.session_state['live_logs'][-100:]
+                
+                st.session_state['ffmpeg_thread'] = threading.Thread(
+                    target=run_ffmpeg, 
+                    args=(video_path, stream_key, is_shorts, log_callback, custom_rtmp or None, st.session_state['session_id']), 
+                    daemon=True
+                )
+                st.session_state['ffmpeg_thread'].start()
+                st.success("🚀 Streaming started!")
+                log_to_database(st.session_state['session_id'], "INFO", f"Streaming started: {video_path}")
+                st.rerun()
         
         if st.button("⏹️ Stop Streaming", type="secondary"):
             st.session_state['streaming'] = False
@@ -1584,7 +1220,9 @@ def main():
             st.subheader("📺 Live Broadcast")
             broadcast_info = st.session_state['live_broadcast_info']
             st.write(f"**Watch URL:** [Open Stream]({broadcast_info['watch_url']})")
-            st.write(f"**Broadcast ID:** {broadcast_info['broadcast_id']}")
+            if 'studio_url' in broadcast_info:
+                st.write(f"**Studio URL:** [Manage]({broadcast_info['studio_url']})")
+            st.write(f"**Broadcast ID:** {broadcast_info.get('broadcast_id', 'N/A')}")
         
         # Statistics
         st.subheader("📈 Statistics")
@@ -1617,7 +1255,7 @@ def main():
     st.header("📝 Live Streaming Logs")
     
     # Log tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["🔴 Live Logs", "📅 Scheduled Streams", "💾 Drafts", "🗂️ All Logs"])
+    tab1, tab2, tab3 = st.tabs(["🔴 Live Logs", "📊 Session History", "🗂️ All Logs"])
     
     with tab1:
         st.subheader("Real-time Streaming Logs")
@@ -1641,119 +1279,27 @@ def main():
             st.rerun()
     
     with tab2:
-        st.subheader("📅 Scheduled Streams Management")
+        st.subheader("Current Session History")
         
-        # Filter options
-        col_filter1, col_filter2 = st.columns(2)
-        
-        with col_filter1:
-            status_filter = st.selectbox("Filter by status", ["All", "pending", "active", "completed", "cancelled", "expired"])
-        
-        with col_filter2:
-            if st.button("🔄 Refresh Scheduled Streams"):
-                st.rerun()
-        
-        # Get scheduled streams
-        if status_filter == "All":
-            scheduled_streams = get_scheduled_streams()
-        else:
-            scheduled_streams = get_scheduled_streams(status_filter)
-        
-        if scheduled_streams:
-            for stream in scheduled_streams:
-                stream_id, title, description, scheduled_time_str, tags, category, privacy, made_for_kids, stream_type, status, video_file, watch_url, channel_name = stream
+        session_logs = get_logs_from_database(st.session_state['session_id'], 100)
+        if session_logs:
+            # Create a formatted display
+            for log in session_logs[:20]:  # Show last 20 session logs
+                timestamp, log_type, message, video_file, channel_name = log
                 
-                scheduled_time = datetime.fromisoformat(scheduled_time_str)
-                
-                with st.expander(f"{status.upper()} - {title} - {scheduled_time.strftime('%Y-%m-%d %H:%M')}"):
-                    col_info1, col_info2 = st.columns(2)
-                    
-                    with col_info1:
-                        st.write(f"**Title:** {title}")
-                        st.write(f"**Description:** {description}")
-                        st.write(f"**Tags:** {tags}")
-                        st.write(f"**Category:** {category}")
-                        st.write(f"**Privacy:** {privacy}")
-                    
-                    with col_info2:
-                        st.write(f"**Scheduled Time:** {scheduled_time.strftime('%Y-%m-%d %H:%M')}")
-                        st.write(f"**Type:** {stream_type}")
-                        st.write(f"**Status:** {status}")
-                        st.write(f"**Made for Kids:** {'Yes' if made_for_kids else 'No'}")
-                        if video_file:
-                            st.write(f"**Video File:** {video_file}")
-                        if watch_url:
-                            st.write(f"**Watch URL:** [Open]({watch_url})")
-                    
-                    # Action buttons
-                    col_action1, col_action2, col_action3 = st.columns(3)
-                    
-                    with col_action1:
-                        if status == "pending" and st.button("▶️ Start Now", key=f"start_now_{stream_id}"):
-                            st.session_state['start_scheduled_stream'] = stream_id
-                            st.rerun()
-                    
-                    with col_action2:
-                        if status in ["pending", "draft"] and st.button("✏️ Edit", key=f"edit_{stream_id}"):
-                            st.info("Edit functionality coming soon!")
-                    
-                    with col_action3:
-                        if st.button("🗑️ Delete", key=f"delete_stream_{stream_id}"):
-                            if delete_scheduled_stream(stream_id):
-                                st.success("Stream deleted!")
-                                st.rerun()
+                # Color code by log type
+                if log_type == "ERROR":
+                    st.error(f"**{timestamp}** - {message}")
+                elif log_type == "INFO":
+                    st.info(f"**{timestamp}** - {message}")
+                elif log_type == "FFMPEG":
+                    st.text(f"{timestamp} - {message}")
+                else:
+                    st.write(f"**{timestamp}** - {message}")
         else:
-            st.info("No scheduled streams found.")
+            st.info("No session logs available yet.")
     
     with tab3:
-        st.subheader("💾 Draft Streams Management")
-        
-        draft_streams = get_scheduled_streams("pending")
-        draft_streams = [s for s in draft_streams if s[8] == "draft"]  # Filter only drafts
-        
-        if draft_streams:
-            for stream in draft_streams:
-                stream_id, title, description, scheduled_time_str, tags, category, privacy, made_for_kids, stream_type, status, video_file, watch_url, channel_name = stream
-                
-                with st.expander(f"📝 {title}"):
-                    col_draft1, col_draft2 = st.columns(2)
-                    
-                    with col_draft1:
-                        st.write(f"**Title:** {title}")
-                        st.write(f"**Description:** {description}")
-                        st.write(f"**Tags:** {tags}")
-                        if video_file:
-                            st.write(f"**Video File:** {video_file}")
-                    
-                    with col_draft2:
-                        st.write(f"**Category:** {category}")
-                        st.write(f"**Privacy:** {privacy}")
-                        st.write(f"**Made for Kids:** {'Yes' if made_for_kids else 'No'}")
-                        if channel_name:
-                            st.write(f"**Channel:** {channel_name}")
-                    
-                    # Action buttons for drafts
-                    col_draft_action1, col_draft_action2, col_draft_action3 = st.columns(3)
-                    
-                    with col_draft_action1:
-                        if st.button("🔴 Go Live", key=f"go_live_{stream_id}"):
-                            # Convert draft to immediate stream
-                            st.session_state['start_scheduled_stream'] = stream_id
-                            st.rerun()
-                    
-                    with col_draft_action2:
-                        if st.button("📅 Schedule", key=f"schedule_draft_{stream_id}"):
-                            st.info("Schedule functionality coming soon!")
-                    
-                    with col_draft_action3:
-                        if st.button("🗑️ Delete", key=f"delete_draft_{stream_id}"):
-                            if delete_scheduled_stream(stream_id):
-                                st.success("Draft deleted!")
-                                st.rerun()
-        else:
-            st.info("No draft streams found.")
-    
-    with tab4:
         st.subheader("All Historical Logs")
         
         # Filter options
