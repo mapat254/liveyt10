@@ -292,6 +292,47 @@ def main():
                                         st.success(f"🎉 Connected to: {channel['snippet']['title']}")
                                         st.session_state['youtube_service'] = service
                                         st.session_state['channel_info'] = channel
+                                        
+                                        # Create downloadable JSON with tokens
+                                        auth_data = {
+                                            "channels": [
+                                                {
+                                                    "name": channel['snippet']['title'],
+                                                    "channel_id": channel['id'],
+                                                    "stream_key": "your-stream-key-here",
+                                                    "description": channel['snippet']['description'][:100] + "..." if len(channel['snippet']['description']) > 100 else channel['snippet']['description'],
+                                                    "auth": {
+                                                        "client_id": oauth_config['client_id'],
+                                                        "client_secret": oauth_config['client_secret'],
+                                                        "refresh_token": tokens.get('refresh_token'),
+                                                        "access_token": tokens['access_token'],
+                                                        "token_uri": oauth_config['token_uri'],
+                                                        "scopes": ["https://www.googleapis.com/auth/youtube.force-ssl"]
+                                                    }
+                                                }
+                                            ],
+                                            "default_settings": {
+                                                "quality": "1080p",
+                                                "privacy": "public",
+                                                "auto_start": False,
+                                                "bitrate": "2500k",
+                                                "framerate": 60
+                                            }
+                                        }
+                                        
+                                        # Store in session for download
+                                        st.session_state['auth_json'] = auth_data
+                                        
+                                        # Show download button
+                                        st.download_button(
+                                            label="💾 Download Authentication JSON",
+                                            data=json.dumps(auth_data, indent=2),
+                                            file_name=f"youtube_auth_{channel['snippet']['title'].replace(' ', '_').lower()}.json",
+                                            mime="application/json",
+                                            help="Download this file to use for future authentication"
+                                        )
+                                        
+                                        st.info("📝 **Important:** Download the JSON file above and save your stream key in it for future use!")
                         else:
                             st.error("Please enter the authorization code")
         
@@ -450,6 +491,10 @@ def main():
             stream_key = st.text_input("Stream Key", 
                                      value=st.session_state.get('current_stream_key', ''), 
                                      type="password")
+            
+            # Show saved authentication if available
+            if 'auth_json' in st.session_state:
+                st.info("✅ Authentication data is ready for download above")
         
         # Streaming settings
         st.subheader("⚙️ Streaming Settings")
@@ -468,6 +513,15 @@ def main():
             custom_rtmp = st.text_input("Custom RTMP URL (optional)")
             stream_title = st.text_input("Stream Title", value="Live Stream")
             stream_description = st.text_area("Stream Description", value="Live streaming session")
+            
+            # Show instructions for using downloaded JSON
+            st.markdown("### 📋 How to use downloaded JSON:")
+            st.markdown("""
+            1. Download the authentication JSON file after successful login
+            2. Edit the JSON file and add your actual stream key
+            3. Upload the modified JSON file in future sessions
+            4. No need to re-authenticate each time!
+            """)
     
     with col2:
         st.header("📊 Status & Controls")
