@@ -537,6 +537,11 @@ def get_channel_info(service, channel_id=None):
 def create_live_stream(service, title, description, scheduled_start_time, tags=None, category_id="20", privacy_status="public", made_for_kids=False):
     """Create a live stream on YouTube with complete settings"""
     try:
+        # Ensure scheduled_start_time is in the future (at least 1 minute from now)
+        min_start_time = datetime.now() + timedelta(minutes=1)
+        if scheduled_start_time < min_start_time:
+            scheduled_start_time = min_start_time
+        
         # Create live stream
         stream_request = service.liveStreams().insert(
             part="snippet,cdn",
@@ -600,11 +605,51 @@ def create_live_stream(service, title, description, scheduled_start_time, tags=N
             "broadcast_id": broadcast_response['id'],
             "stream_id": stream_response['id'],
             "watch_url": f"https://www.youtube.com/watch?v={broadcast_response['id']}",
+            "studio_url": f"https://studio.youtube.com/channel/UC{broadcast_response['snippet']['channelId']}/livestreaming",
             "broadcast_response": broadcast_response
         }
     except Exception as e:
         st.error(f"Error creating live stream: {e}")
         return None
+
+def create_immediate_live_stream(service, title, description, tags=None, category_id="20", privacy_status="public", made_for_kids=False):
+    """Create an immediate live stream that starts now"""
+    try:
+        # Set start time to now + 30 seconds to allow for setup
+        start_time = datetime.now() + timedelta(seconds=30)
+        
+        return create_live_stream(
+            service, title, description, start_time, tags, category_id, privacy_status, made_for_kids
+        )
+    except Exception as e:
+        st.error(f"Error creating immediate live stream: {e}")
+        return None
+
+def get_existing_live_streams(service):
+    """Get existing live streams from YouTube"""
+    try:
+        # Get live broadcasts
+        broadcasts_request = service.liveBroadcasts().list(
+            part="snippet,status,contentDetails",
+            broadcastStatus="all",
+            maxResults=50
+        )
+        broadcasts_response = broadcasts_request.execute()
+        
+        # Get live streams
+        streams_request = service.liveStreams().list(
+            part="snippet,cdn,status",
+            maxResults=50
+        )
+        streams_response = streams_request.execute()
+        
+        return {
+            "broadcasts": broadcasts_response.get('items', []),
+            "streams": streams_response.get('items', [])
+        }
+    except Exception as e:
+        st.error(f"Error getting existing live streams: {e}")
+        return {"broadcasts": [], "streams": []}
 
 def run_ffmpeg(video_path, stream_key, is_shorts, log_callback, rtmp_url=None, session_id=None):
     """Run FFmpeg for streaming with enhanced logging"""
@@ -1196,14 +1241,14 @@ def main():
         col_basic1, col_basic2 = st.columns(2)
         
         with col_basic1:
-            stream_title = st.text_input("🎬 Stream Title", value="Live Stream", max_chars=100)
-            privacy_status = st.selectbox("🔒 Privacy", ["public", "unlisted", "private"])
-            made_for_kids = st.checkbox("👶 Made for Kids")
+            stream_title = st.text_input("🎬 Stream Title", value="Live Stream", max_chars=100, key="stream_title")
+            privacy_status = st.selectbox("🔒 Privacy", ["public", "unlisted", "private"], key="privacy_status")
+            made_for_kids = st.checkbox("👶 Made for Kids", key="made_for_kids")
         
         with col_basic2:
             categories = get_youtube_categories()
             category_names = list(categories.values())
-            selected_category_name = st.selectbox("📂 Category", category_names, index=category_names.index("Gaming"))
+            selected_category_name = st.selectbox("📂 Category", category_names, index=category_names.index("Gaming"), key="category")
             category_id = [k for k, v in categories.items() if v == selected_category_name][0]
             
             # Date and time inputs based on schedule type
@@ -1232,12 +1277,22 @@ def main():
         stream_description = st.text_area("📄 Stream Description", 
                                         value="Live streaming session", 
                                         max_chars=5000,
-                                        height=100)
+                                        height=100,
+                                        key="stream_description")
         
         # Tags
         tags_input = st.text_input("🏷️ Tags (comma separated)", 
-                                 placeholder="gaming, live, stream, youtube")
+                                 placeholder="gaming, live, stream, youtube",
+                                 key="tags_input")
         tags = [tag.strip() for tag in tags_input.split(",") if tag.strip()] if tags_input else []
+        
+        # Store current form values in session state for YouTube Live creation
+        st.session_state['temp_stream_title'] = stream_title
+        st.session_state['temp_stream_description'] = stream_description
+        st.session_state['temp_tags'] = tags
+        st.session_state['temp_category_id'] = category_id
+        st.session_state['temp_privacy_status'] = privacy_status
+        st.session_state['temp_made_for_kids'] = made_for_kids
         
         if tags:
             st.write("**Tags:**", ", ".join(tags))
