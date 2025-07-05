@@ -277,20 +277,281 @@ def main():
                     
                     # Check for automatic auth code from URL
                     try:
-                        query_params = st.query_params
-                        auto_auth_code = query_params.get('code', None)
-                    except:
-                        # Fallback for older Streamlit versions
+                        # Try different methods to get query parameters
+                        auto_auth_code = None
+                        
+                        # Method 1: Modern Streamlit
                         try:
-                            query_params = st.experimental_get_query_params()
-                            auto_auth_code = query_params.get('code', [None])[0] if 'code' in query_params else None
+                            query_params = st.query_params
+                            auto_auth_code = query_params.get('code', None)
                         except:
-                            auto_auth_code = None
+                            pass
+                        
+                        # Method 2: Legacy Streamlit
+                        if not auto_auth_code:
+                            try:
+                                query_params = st.experimental_get_query_params()
+                                auto_auth_code = query_params.get('code', [None])[0] if 'code' in query_params else None
+                            except:
+                                pass
+                        
+                        # Method 3: JavaScript fallback
+                        if not auto_auth_code:
+                            js_code = """
+                            <script>
+                            const urlParams = new URLSearchParams(window.location.search);
+                            const code = urlParams.get('code');
+                            if (code) {
+                                window.parent.postMessage({type: 'auth_code', code: code}, '*');
+                            }
+                            </script>
+                            """
+                            components.html(js_code, height=0)
+                    except:
+                        auto_auth_code = None
                     
                     if auto_auth_code:
-                        # Check if this code was already processed
-                        current_code_hash = hash(auto_auth_code)
-                        if st.session_state.get('last_processed_code_hash') != current_code_hash:
+                        # Clean and validate the auth code
+                        auto_auth_code = auto_auth_code.strip()
+                        
+                        # Check if this is a valid looking auth code (should be long and contain specific characters)
+                        if len(auto_auth_code) > 20 and '/' in auto_auth_code:
+                            # Check if this code was already processed
+                            current_code_hash = hash(auto_auth_code)
+                            
+                            # Always try to process if we haven't seen this exact code before
+                            if st.session_state.get('last_processed_code_hash') != current_code_hash:
+                                st.info("🔄 Processing authorization code from URL...")
+                                st.write(f"Debug: Found auth code: {auto_auth_code[:20]}...")
+                                
+                                # Process the auth code immediately
+                                with st.spinner("Exchanging authorization code for tokens..."):
+                                    tokens = exchange_code_for_tokens(oauth_config, auto_auth_code)
+                                
+                                if tokens:
+                                    st.success("✅ Tokens obtained successfully!")
+                                    st.session_state['youtube_tokens'] = tokens
+                                    st.session_state['last_processed_code_hash'] = current_code_hash
+                                    
+                                    # Create credentials for YouTube service
+                                    creds_dict = {
+                                        'access_token': tokens['access_token'],
+                                        'refresh_token': tokens.get('refresh_token'),
+                                        'token_uri': oauth_config['token_uri'],
+                                        'client_id': oauth_config['client_id'],
+                                        'client_secret': oauth_config['client_secret']
+                                    }
+                                    
+                                    # Test the connection
+                                    service = create_youtube_service(creds_dict)
+                                    if service:
+                                        channels = get_channel_info(service)
+                                        if channels:
+                                            channel = channels[0]
+                                            st.success(f"🎉 Connected to: {channel['snippet']['title']}")
+                                            st.session_state['youtube_service'] = service
+                                            st.session_state['channel_info'] = channel
+                                            st.session_state['auto_authenticated'] = True
+                                            
+                                            # Create downloadable JSON with tokens
+                                            auth_data = {
+                                                "channels": [
+                                                    {
+                                                        "name": channel['snippet']['title'],
+                                                        "channel_id": channel['id'],
+                                                        "stream_key": "your-stream-key-here",
+                                                        "description": channel['snippet']['description'][:100] + "..." if len(channel['snippet']['description']) > 100 else channel['snippet']['description'],
+                                                        "auth": {
+                                                            "client_id": oauth_config['client_id'],
+                                                            "client_secret": oauth_config['client_secret'],
+                                                            "refresh_token": tokens.get('refresh_token'),
+                                                            "access_token": tokens['access_token'],
+                                                            "token_uri": oauth_config['token_uri'],
+                                                            "scopes": ["https://www.googleapis.com/auth/youtube.force-ssl"]
+                                                        }
+                                                    }
+                                                ],
+                                                "default_settings": {
+                                                    "quality": "1080p",
+                                                    "privacy": "public",
+                                                    "auto_start": False,
+                                                    "bitrate": "2500k",
+                                                    "framerate": 60
+                                                }
+                                            }
+                                            
+                                            # Store in session for download
+                                            st.session_state['auth_json'] = auth_data
+                                            
+                                            # Show download button
+                                            st.download_button(
+                                                label="💾 Download Authentication JSON",
+                                                data=json.dumps(auth_data, indent=2),
+                                                file_name=f"youtube_auth_{channel['snippet']['title'].replace(' ', '_').lower()}.json",
+                                                mime="application/json",
+                                                help="Download this file to use for future authentication",
+                                                key="download_auth_json"
+                                            )
+                                            
+                                            st.info("📝 **Important:** Download the JSON file above and save your stream key in it for future use!")
+                                            
+                                            # Clear URL parameters to clean up the URL
+                                            try:
+                                                st.query_params.clear()
+                                            except:
+                                                try:
+                                                    st.experimental_set_query_params()
+                                                except:
+                                                    pass
+                                            
+                                            # Force rerun to refresh the page
+                                            st.rerun()
+                                else:
+                                    st.session_state['last_processed_code_hash'] = current_code_hash
+                                    st.error("❌ Failed to process authorization code. This code may be expired or already used.")
+                                    
+                                    # Clear URL parameters on error
+                                    try:
+                                        st.query_params.clear()
+                                    except:
+                                        try:
+                                            st.experimental_set_query_params()
+                                        except:
+                                            pass
+                            else:
+                                st.warning("⚠️ This authorization code was already processed.")
+                        else:
+                            st.error("❌ Invalid authorization code format detected in URL.")
+                    
+                    # Always show the get new code button if there's any issue
+                    if auto_auth_code or st.session_state.get('last_processed_code_hash'):
+                        if st.button("🔄 Get New Authorization Code", key="new_auth_code"):
+                            # Clear all auth-related session state
+                            keys_to_clear = [
+                                'last_processed_code_hash', 
+                                'youtube_tokens', 
+                                'youtube_service', 
+                                'channel_info', 
+                                'auto_authenticated',
+                                'auth_json'
+                            ]
+                            for key in keys_to_clear:
+                                if key in st.session_state:
+                                    del st.session_state[key]
+                            
+                            # Clear URL parameters
+                            try:
+                                st.query_params.clear()
+                            except:
+                                try:
+                                    st.experimental_set_query_params()
+                                except:
+                                    pass
+                            
+                            st.rerun()
+                    
+                    # Manual input section (always available as fallback)
+                    if not auto_auth_code or st.session_state.get('show_manual_input', False):
+                        st.markdown("---")
+                        st.subheader("🔧 Manual Authorization Code Input")
+                        
+                        if not auto_auth_code:
+                            st.info("💡 **Instructions:**")
+                            st.markdown("""
+                            1. Click the authorization link above
+                            2. Grant permissions to your YouTube account  
+                            3. You'll be redirected back automatically
+                            4. If redirect fails, copy the code from the URL and paste below
+                            """)
+                        
+                        # Authorization code input
+                        manual_auth_code = st.text_input(
+                            "Authorization Code", 
+                            type="password",
+                            help="Paste the authorization code from the URL if automatic processing failed"
+                        )
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            if st.button("Exchange Code for Tokens", key="manual_exchange"):
+                                if manual_auth_code:
+                                    with st.spinner("Processing manual authorization code..."):
+                                        tokens = exchange_code_for_tokens(oauth_config, manual_auth_code)
+                                    if tokens:
+                                        st.success("✅ Manual token exchange successful!")
+                                        st.session_state['youtube_tokens'] = tokens
+                                        st.rerun()
+                                else:
+                                    st.error("Please enter the authorization code")
+                        
+                        with col2:
+                            if st.button("Show Manual Input", key="show_manual") if not st.session_state.get('show_manual_input', False) else st.button("Hide Manual Input", key="hide_manual"):
+                                st.session_state['show_manual_input'] = not st.session_state.get('show_manual_input', False)
+                                st.rerun()
+                    
+                    # Success state - show what to do next
+                    if 'youtube_service' in st.session_state and 'channel_info' in st.session_state:
+                        st.success("🎉 **Authentication Successful!**")
+                        channel = st.session_state['channel_info']
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Channel", channel['snippet']['title'])
+                            st.metric("Subscribers", channel['statistics'].get('subscriberCount', 'Hidden'))
+                        with col2:
+                            st.metric("Total Views", channel['statistics'].get('viewCount', '0'))
+                            st.metric("Videos", channel['statistics'].get('videoCount', '0'))
+                        
+                        if 'auth_json' in st.session_state:
+                            st.download_button(
+                                label="💾 Download Authentication JSON",
+                                data=json.dumps(st.session_state['auth_json'], indent=2),
+                                file_name=f"youtube_auth_{channel['snippet']['title'].replace(' ', '_').lower()}.json",
+                                mime="application/json",
+                                help="Download this file to use for future authentication",
+                                key="download_auth_json_success"
+                            )
+                        
+                        st.info("✅ You can now proceed to upload videos and start streaming!")
+                    
+                    # Debug information (collapsible)
+                    with st.expander("🔧 Debug Information"):
+                        try:
+                            query_params = st.query_params
+                            st.write("Current URL parameters:", dict(query_params))
+                        except:
+                            try:
+                                query_params = st.experimental_get_query_params()
+                                st.write("Current URL parameters (legacy):", query_params)
+                            except:
+                                st.write("Could not retrieve URL parameters")
+                        
+                        if auto_auth_code:
+                            st.write("Auto-detected auth code:", auto_auth_code[:50] + "..." if len(auto_auth_code) > 50 else auto_auth_code)
+                        
+                        if 'last_processed_code_hash' in st.session_state:
+                            st.write("Last processed code hash:", st.session_state['last_processed_code_hash'])
+                        
+                        st.write("Session state keys:", [k for k in st.session_state.keys() if not k.startswith('_')])
+                        
+                        # Button to clear all session state
+                        if st.button("🗑️ Clear All Session Data", key="clear_debug"):
+                            st.session_state.clear()
+                            st.success("Session data cleared!")
+                            st.rerun()
+                else:
+                    st.info("💡 **Next Steps:**")
+                    st.markdown("""
+                    1. Click the authorization link above
+                    2. Grant permissions to your YouTube account
+                    3. You'll be redirected back automatically
+                    4. Download the generated JSON file for future use
+                    """)
+                    
+                    # Show manual input option
+                    if st.button("🔧 Use Manual Code Input", key="enable_manual"):
+                        st.session_state['show_manual_input'] = True
+                        st.rerun()
                             st.info("🔄 Processing authorization code from URL...")
                             st.write(f"Debug: Found auth code: {auto_auth_code[:20]}...")
                             
